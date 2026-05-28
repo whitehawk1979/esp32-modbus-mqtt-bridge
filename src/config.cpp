@@ -61,17 +61,19 @@ void config_init() { cfg_defaults(); }
 
 void config_load() {
     Preferences nv;
-    nv.begin(NV_NAMESPACE, true);
+    nv.begin(NV_NAMESPACE, false);  // RW mode needed for fallback save
     
     nv.getString(NV_KEY_WIFI_SSID, cfg.wifi_ssid, sizeof(cfg.wifi_ssid));
     nv.getString(NV_KEY_WIFI_PASS, cfg.wifi_pass, sizeof(cfg.wifi_pass));
     nv.getString(NV_KEY_AP_NAME, cfg.ap_name, sizeof(cfg.ap_name));
     
-    // Hardcoded fallback: if NVRAM is empty (first boot / after erase),
+    // Hardcoded fallback: if NVRAM is empty or WiFi pass missing (after erase/restore),
     // use factory WiFi so device auto-connects to home router
-    if (strlen(cfg.wifi_ssid) == 0) {
-        strlcpy(cfg.wifi_ssid, "Air 2", sizeof(cfg.wifi_ssid));
+    if (strlen(cfg.wifi_ssid) == 0 || strlen(cfg.wifi_pass) == 0) {
+        if (strlen(cfg.wifi_ssid) == 0) strlcpy(cfg.wifi_ssid, "Air 2", sizeof(cfg.wifi_ssid));
         strlcpy(cfg.wifi_pass, "decembertizenhat", sizeof(cfg.wifi_pass));
+        nv.putString(NV_KEY_WIFI_SSID, cfg.wifi_ssid);
+        nv.putString(NV_KEY_WIFI_PASS, cfg.wifi_pass);
     }
     cfg.wifi_mode = nv.getUChar(NV_KEY_WIFI_MODE, 0);
     cfg.wifi_dhcp = nv.getBool(NV_KEY_WIFI_DHCP, true);
@@ -126,9 +128,13 @@ void config_load() {
     // Fallback if NVRAM empty
     if (strlen(cfg.hostname) == 0) strlcpy(cfg.hostname, "modbusmqtt", sizeof(cfg.hostname));
     
-    // Web authentication
-    cfg.web_auth = nv.getBool(NV_KEY_WEB_AUTH, false);
+    // Web authentication (default: admin/admin)
+    cfg.web_auth = nv.getBool(NV_KEY_WEB_AUTH, true);
     nv.getString(NV_KEY_WEB_PASS, cfg.web_pass, sizeof(cfg.web_pass));
+    if (strlen(cfg.web_pass) == 0) {
+        strlcpy(cfg.web_pass, "admin", sizeof(cfg.web_pass));
+        nv.putString(NV_KEY_WEB_PASS, cfg.web_pass);
+    }
     
     nv.end();
     config_print();
