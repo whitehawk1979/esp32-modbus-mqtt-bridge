@@ -126,6 +126,10 @@ void config_load() {
     // Fallback if NVRAM empty
     if (strlen(cfg.hostname) == 0) strlcpy(cfg.hostname, "modbusmqtt", sizeof(cfg.hostname));
     
+    // Web authentication
+    cfg.web_auth = nv.getBool(NV_KEY_WEB_AUTH, false);
+    nv.getString(NV_KEY_WEB_PASS, cfg.web_pass, sizeof(cfg.web_pass));
+    
     nv.end();
     config_print();
 }

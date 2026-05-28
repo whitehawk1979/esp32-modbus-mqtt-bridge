@@ -31,6 +31,17 @@ void handleOtaUpload();
 
 WebServer web(80);
 
+// ─── Web Authentication Helper ─────────────────────────────────
+// Check if web authentication is required and validate
+bool web_auth_ok() {
+    if (!cfg.web_auth || strlen(cfg.web_pass) == 0) return true;  // Auth disabled
+    if (!web.authenticate("admin", cfg.web_pass)) {
+        web.requestAuthentication(DIGEST_AUTH, "ModbusMQTT");
+        return false;
+    }
+    return true;
+}
+
 // ─── External declarations ─────────────────────────────────────
 extern Slave_Module *modules;
 extern uint16_t module_count;
@@ -41,6 +52,7 @@ extern bool mqtt_is_connected();
 // ─── Relay Control Handler ───────────────────────────────────
 // GET /relay?addr=1&relay=0&state=1  (state: 1=ON, 0=OFF)
 static void handleRelay() {
+    if (!web_auth_ok()) return;
     if (!web.hasArg("addr") || !web.hasArg("relay") || !web.hasArg("state")) {
         web.send(400, "application/json", "{\"ok\":false,\"error\":\"missing params\"}");
         return;
@@ -447,6 +459,12 @@ button:hover{background:#2ea043}
     html += "<div class=\"fm\"><label>Jelszó</label><input type=\"password\" name=\"mpass\" value=\"" + String(cfg.mqtt_pass) + "\"></div></div>";
     html += "<div class=\"fm\"><label>MQTT Prefix</label><input name=\"mpfx\" value=\"" + String(cfg.mqtt_prefix) + "\"></div>";
     
+    // ── Auth Section ─────────────────────────────────────
+    html += "<h2>&#128272; Web hitelesítés</h2>";
+    html += "<div class=\"chk\"><input type=\"checkbox\" id=\"wauth\" name=\"wauth\" value=\"1\" " + String(cfg.web_auth?"checked":"") + "><label for=\"wauth\">Web hitelesítés bekapcsolása</label></div>";
+    html += "<div class=\"fm\"><label>Auth jelszó</label><input type=\"password\" name=\"wauthp\" value=\"" + String(cfg.web_pass) + "\" placeholder=\"Üres = kikapcsolva\"></div>";
+    html += "<p class=\"note\">A hitelesítés védi az író műveleteket (relé, konfig, OTA). Olvasás (státusz) nyitva marad. Felhasználónév: admin</p>";
+    
     // ── HA Section ───────────────────────────────────────
     html += "<h2>&#127968; Home Assistant</h2>";
     html += "<div class=\"chk\"><input type=\"checkbox\" id=\"hadisc\" name=\"hadisc\" value=\"1\" " + String(cfg.ha_discovery?"checked":"") + "><label for=\"hadisc\">Auto-discovery (MQTT automatikus eszközfelvétel)</label></div>";
@@ -515,6 +533,7 @@ function toggleGeneric(){var p=document.getElementById('mbprof').value;document.
 
 // ─── SAVE Handler ──────────────────────────────────────────────
 static void handleSave() {
+    if (!web_auth_ok()) return;
     Preferences nv;
     nv.begin(NV_NAMESPACE, false);
     
@@ -563,6 +582,9 @@ static void handleSave() {
     
     if (web.hasArg("hostname"))   nv.putString(NV_KEY_HOSTNAME, web.arg("hostname"));
     
+    if (web.hasArg("wauth"))       nv.putBool(NV_KEY_WEB_AUTH, web.arg("wauth") == "1");
+    if (web.hasArg("wauthp"))      nv.putString(NV_KEY_WEB_PASS, web.arg("wauthp"));
+    
     nv.end();
     LOG_ILN("[WEB] Settings saved");
     
@@ -580,6 +602,7 @@ static void handleSave() {
 
 // ─── RESTART Handler ───────────────────────────────────────────
 static void handleRestart() {
+    if (!web_auth_ok()) return;
     web.send(200, "text/html", R"rawliteral(<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Újraindítás</title>
 <style>body{font-family:sans-serif;background:#0d1117;color:#c9d1d9;text-align:center;padding:40px}
 .ok{color:#f0883e;font-size:28px}p{margin:12px 0;color:#8b949e}</style></head>
@@ -910,6 +933,7 @@ function toggleRelay(addr,relay,curState){
 
 // ─── SAVE PINS HANDLER ─────────────────────────────────────────
 static void handleSavePins() {
+    if (!web_auth_ok()) return;
     Preferences nv;
     nv.begin(NV_NAMESPACE, false);
 
@@ -944,6 +968,7 @@ static void handleSavePins() {
 
 // ─── SAVE MODULES HANDLER ──────────────────────────────────────
 static void handleSaveModules() {
+    if (!web_auth_ok()) return;
     // Iterate all module slave addresses and save their names + area + entity names
     for (uint16_t i = 0; i < module_count; i++) {
         Slave_Module &m = modules[i];
@@ -1049,6 +1074,7 @@ static String urlEncode(const String& s) {
 
 // ─── Add custom room ───────────────────────────────────────────
 static void handleAddRoom() {
+    if (!web_auth_ok()) return;
     String name = web.arg("name");
     name.trim();
     if (name.length() == 0) { web.sendHeader("Location","/modules"); web.send(302); return; }
@@ -1099,6 +1125,7 @@ static void handleAddRoom() {
 
 // ─── Delete custom room ────────────────────────────────────────
 static void handleDelRoom() {
+    if (!web_auth_ok()) return;
     String name = web.arg("name");
     name.trim();
     if (name.length() == 0) { web.sendHeader("Location","/modules"); web.send(302); return; }
@@ -1149,6 +1176,7 @@ static void handleApiScan() {
 
 // ─── Toggle virtual module ON/OFF ────────────────────────────────
 static void handleToggleVMod() {
+    if (!web_auth_ok()) return;
     Preferences nv;
     nv.begin(NV_NAMESPACE, false);
     bool cur = nv.getBool(NV_KEY_VIRTUAL_MOD, false);
@@ -1181,6 +1209,7 @@ static void handleToggleVMod() {
 }
 
 static void handleRescan() {
+    if (!web_auth_ok()) return;
     config_clear_module_list();  // Clear saved list on rescan
     scan_modbus_start();
     scanning_done = false;
@@ -1196,6 +1225,7 @@ static void handleRescan() {
 }
 
 static void handleSaveModList() {
+    if (!web_auth_ok()) return;
     config_save_module_list();
     web.send(200, "text/html", R"rawliteral(<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Mentés</title>
 <style>body{font-family:sans-serif;background:#0d1117;color:#c9d1d9;text-align:center;padding:40px}
@@ -1408,10 +1438,13 @@ static const struct { const char* key; char type; } BACKUP_KEYS[] = {
     {"pecs",'i'}, {"peint",'i'}, {"perst",'i'},
     {"rooms",'s'},
     {"mlist_n",'B'},
+    {"wauth",'b'},
+    {"wauthp",'s'},
 };
 #define BACKUP_KEYS_COUNT (sizeof(BACKUP_KEYS)/sizeof(BACKUP_KEYS[0]))
 
 static void handleApiBackup() {
+    if (!web_auth_ok()) return;
     JsonDocument doc;
     Preferences nv;
     nv.begin(NV_NAMESPACE, true);
@@ -1430,6 +1463,12 @@ static void handleApiBackup() {
             case 'i': doc[key] = nv.getInt(key, 0); break;
         }
     }
+
+    // Password masking — never expose real passwords in backup
+    doc["wpass"] = "***";
+    doc["mpass"] = "***";
+    doc["wauthp"] = "***";
+    doc["passwords_masked"] = true;
 
     // Module list entries
     uint8_t mlist_n = nv.getUInt("mlist_n", 0);
@@ -1464,6 +1503,7 @@ static void handleApiBackup() {
 }
 
 static void handleApiRestore() {
+    if (!web_auth_ok()) return;
     if (!web.hasArg("plain")) {
         web.send(400, "application/json", "{\"ok\":false,\"error\":\"no body\"}");
         return;
@@ -1486,9 +1526,13 @@ static void handleApiRestore() {
     // Build lookup from BACKUP_KEYS for type-correct writes
     for (JsonPair kv : inDoc.as<JsonObject>()) {
         const char* key = kv.key().c_str();
-        if (strcmp(key, "type") == 0 || strcmp(key, "version") == 0) continue;
+        if (strcmp(key, "type") == 0 || strcmp(key, "version") == 0 || 
+            strcmp(key, "passwords_masked") == 0) continue;
 
         JsonVariant val = kv.value();
+
+        // Skip masked passwords — don't overwrite with literal "***"
+        if (val.is<const char*>() && strcmp(val.as<const char*>(), "***") == 0) continue;
 
         // Find type from BACKUP_KEYS table
         char ktype = 0;

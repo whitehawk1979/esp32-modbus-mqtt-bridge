@@ -149,6 +149,8 @@ document.getElementById('otaForm').onsubmit=function(){
 
 // ─── OTA Upload Handler ──────────────────────────────────────
 void handleOtaUpload() {
+    // Auth check for OTA — must validate before processing upload
+    if (!web_auth_ok()) return;
     HTTPUpload &upload = web.upload();
     
     if (upload.status == UPLOAD_FILE_START) {

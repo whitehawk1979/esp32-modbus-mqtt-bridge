@@ -189,6 +189,9 @@ enum NetInterface : uint8_t {
 #define MAX_SAVED_MODULES  16       // Max modules in saved list
 #define NV_KEY_ROOMS      "rooms"   // Custom room list (newline-separated)
 #define MAX_ROOMS         30
+// Web authentication
+#define NV_KEY_WEB_AUTH   "wauth"   // Enable web auth (bool)
+#define NV_KEY_WEB_PASS   "wauthp"  // Auth password (NOT "wpass" — that's WiFi!)
 // Module aliases (per slave_addr, keys "mn1".."mn247" and "hn1".."hn247")
 
 // ─── Click event types ──────────────────────────────────────────
@@ -309,6 +312,9 @@ struct AppConfig {
     int8_t pin_eth_rst;      // W5500 RST (default: 9)
     // Device identity
     char hostname[32];      // mDNS + AP SSID suffix + MQTT client ID (default: "modbusmqtt")
+    // Web authentication
+    bool web_auth;          // Enable Digest Auth on write endpoints
+    char web_pass[32];      // Auth password (empty = disabled)
 };
 
 extern AppConfig cfg;
@@ -408,6 +414,7 @@ void eth_web_loop();
 // web_server.cpp
 void web_server_init();
 void web_server_loop();
+bool web_auth_ok();  // Check web auth, return true if OK or auth disabled
 
 // config.cpp
 void config_init();

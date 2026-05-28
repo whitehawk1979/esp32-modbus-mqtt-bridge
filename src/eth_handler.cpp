@@ -381,6 +381,24 @@ static void eth_send_redirect_wifi(EthernetClient& client) {
     client.stop();
 }
 
+// ── LAN auth check (simple query-param auth for raw EthernetClient) ──
+// Returns true if auth is OK or auth is disabled.
+// query = full path including ?query string
+static bool eth_auth_ok(EthernetClient& client, const String& path) {
+    if (!cfg.web_auth || strlen(cfg.web_pass) == 0) return true;  // Auth disabled
+    // Look for auth=PASSWORD in query string
+    String authParam = "auth=" + String(cfg.web_pass);
+    if (path.indexOf(authParam) >= 0) return true;
+    // Auth failed — return 401
+    client.println("HTTP/1.1 401 Unauthorized");
+    client.println("Content-Type: application/json");
+    client.println("Connection: close");
+    client.println();
+    client.println("{\"error\":\"unauthorized\",\"hint\":\"add ?auth=PASSWORD to request\"}");
+    client.stop();
+    return false;
+}
+
 static void eth_handle_api_status(EthernetClient& client) {
     // Mirror of handleApiStatus() — JSON status response
     client.printf(
@@ -480,6 +498,7 @@ void eth_web_loop() {
     } else if (path.startsWith("/api/")) {
         // ── Extended API: /api/reboot, /api/wifi-reconnect, /api/save-wifi ──
         if (path == "/api/reboot") {
+            if (!eth_auth_ok(client, path)) return;
             eth_send_text(client, 200, "Rebooting...");
             delay(500);
             ESP.restart();
@@ -489,6 +508,7 @@ void eth_web_loop() {
         } else if (path.startsWith("/api/save-wifi")) {
             // ── Save WiFi+MQTT config via query params (for LAN-only access) ──
             // See /api/save-wifi?ssid=X&wpass=Y&...
+            if (!eth_auth_ok(client, path)) return;
             Preferences nv;
             nv.begin(NV_NAMESPACE, false);
             int qi = path.indexOf('?');
@@ -552,6 +572,7 @@ void eth_web_loop() {
 
         // ── /api/export — Full config export (all NVRAM keys + module names) ──
         } else if (path.startsWith("/api/export")) {
+            if (!eth_auth_ok(client, path)) return;
             Preferences nv;
             nv.begin(NV_NAMESPACE, true);
 
@@ -561,12 +582,13 @@ void eth_web_loop() {
                 NV_KEY_MQTT_HOST, NV_KEY_MQTT_USER, NV_KEY_MQTT_PASS,
                 NV_KEY_MQTT_PREFIX, NV_KEY_AP_NAME, NV_KEY_WIFI_IP,
                 NV_KEY_WIFI_GW, NV_KEY_WIFI_MASK, NV_KEY_WIFI_DNS,
-                NV_KEY_ETH_IP, NV_KEY_ETH_GW, NV_KEY_ETH_MASK, NV_KEY_ETH_DNS
+                NV_KEY_ETH_IP, NV_KEY_ETH_GW, NV_KEY_ETH_MASK, NV_KEY_ETH_DNS,
+                NV_KEY_WEB_PASS
             };
             const char* str_names[] = {
                 "ssid","wpass","hostname","mhost","muser","mpass",
                 "mpfx","apn","wip","wgw","wmask","wdns",
-                "eip","egw","emask","edns"
+                "eip","egw","emask","edns","wauthp"
             };
             const int str_count = sizeof(str_keys)/sizeof(str_keys[0]);
 
@@ -592,10 +614,10 @@ void eth_web_loop() {
             const char* bool_keys[] = {
                 NV_KEY_ETH_EN, NV_KEY_ETH_DHCP, NV_KEY_WIFI_DHCP,
                 NV_KEY_TCP_EN, NV_KEY_HA_DISC, NV_KEY_VIRTUAL_MOD,
-                NV_KEY_MQTT_TLS
+                NV_KEY_MQTT_TLS, NV_KEY_WEB_AUTH
             };
             const char* bool_names[] = {
-                "ethen","edhcp","wdhcp","tcpen","hadisc","vmod","mtls"
+                "ethen","edhcp","wdhcp","tcpen","hadisc","vmod","mtls","wauth"
             };
             const int bool_count = sizeof(bool_keys)/sizeof(bool_keys[0]);
 
@@ -743,13 +765,23 @@ void eth_web_loop() {
             // Firmware version
             json += ",\"fw_version\":\"" + String(FIRMWARE_VERSION) + "\"";
 
+            // Password masking
+            json += ",\"passwords_masked\":true";
+
             json += "}"; // end root
             nv.end();
+
+            // Replace real passwords with "***" in the output
+            // (passwords are at known JSON positions — simple string replace)
+            json.replace(String("\"wpass\":\"") + nv.getString(NV_KEY_WIFI_PASS, "") + "\"", "\"wpass\":\"***\"");
+            json.replace(String("\"mpass\":\"") + nv.getString(NV_KEY_MQTT_PASS, "") + "\"", "\"mpass\":\"***\"");
+            json.replace(String("\"wauthp\":\"") + nv.getString(NV_KEY_WEB_PASS, "") + "\"", "\"wauthp\":\"***\"");
 
             eth_send_json(client, 200, json.c_str());
 
         // ── /api/import — Full config import from JSON query param body ──
         } else if (path.startsWith("/api/import")) {
+            if (!eth_auth_ok(client, path)) return;
             // Parse query string from URL for import data
             int qi = path.indexOf('?');
             if (qi < 0) {
