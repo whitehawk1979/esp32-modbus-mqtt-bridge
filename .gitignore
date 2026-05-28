@@ -2,3 +2,8 @@
 *.bin
 *.elf
 *.map
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
