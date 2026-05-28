@@ -27,6 +27,7 @@ static void cfg_defaults() {
     strlcpy(cfg.wifi_pass, "decembertizenhat", sizeof(cfg.wifi_pass));
     cfg.wifi_mode = 0;       // AP+STA
     cfg.wifi_dhcp = true;
+    strlcpy(cfg.ap_pass, "12345678", sizeof(cfg.ap_pass));
     // ── LAN: W5500 enabled ──
     cfg.lan_enabled = true;
     cfg.lan_dhcp = true;
@@ -88,6 +89,10 @@ static void factory_provision(Preferences &nv) {
     if (strlen(buf) == 0) { nv.putString(NV_KEY_WIFI_PASS, "decembertizenhat"); dirty = true; }
     if (!nv.isKey(NV_KEY_WIFI_MODE)) { nv.putUChar(NV_KEY_WIFI_MODE, 0); dirty = true; }
     if (!nv.isKey(NV_KEY_WIFI_DHCP)) { nv.putBool(NV_KEY_WIFI_DHCP, true); dirty = true; }
+
+    // ── AP password ──
+    nv.getString(NV_KEY_AP_PASS, buf, sizeof(buf));
+    if (strlen(buf) == 0) { nv.putString(NV_KEY_AP_PASS, "12345678"); dirty = true; }
 
     // ── LAN (W5500 enabled by default) ──
     if (!nv.isKey(NV_KEY_ETH_EN)) { nv.putBool(NV_KEY_ETH_EN, true); dirty = true; }
@@ -186,6 +191,8 @@ void config_load() {
     nv.getString(NV_KEY_WIFI_SSID, cfg.wifi_ssid, sizeof(cfg.wifi_ssid));
     nv.getString(NV_KEY_WIFI_PASS, cfg.wifi_pass, sizeof(cfg.wifi_pass));
     nv.getString(NV_KEY_AP_NAME, cfg.ap_name, sizeof(cfg.ap_name));
+    nv.getString(NV_KEY_AP_PASS, cfg.ap_pass, sizeof(cfg.ap_pass));
+    if (strlen(cfg.ap_pass) == 0) strlcpy(cfg.ap_pass, "12345678", sizeof(cfg.ap_pass));
     cfg.wifi_mode = nv.getUChar(NV_KEY_WIFI_MODE, 0);
     cfg.wifi_dhcp = nv.getBool(NV_KEY_WIFI_DHCP, true);
     nv.getString(NV_KEY_WIFI_IP, cfg.wifi_ip, sizeof(cfg.wifi_ip));
@@ -647,7 +654,7 @@ void config_start_portal() {
     portal_active = true;
     
     WiFi.mode(WIFI_AP_STA);
-    WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS);
+    WiFi.softAP(WIFI_AP_SSID, strlen(cfg.ap_pass) ? cfg.ap_pass : "12345678");
     
     LOG_I("[PORTAL] AP: %s, IP: %s\n", WIFI_AP_SSID, WiFi.softAPIP().toString().c_str());
     dns.start(53, "*", WiFi.softAPIP());

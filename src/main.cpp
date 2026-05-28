@@ -123,7 +123,7 @@ static void wifi_connect() {
     
     // Set mode FIRST, then start AP (order matters on ESP32-S3!)
     WiFi.mode(WIFI_AP);
-    bool ok = WiFi.softAP(ap_name.c_str(), WIFI_AP_PASS);
+    bool ok = WiFi.softAP(ap_name.c_str(), cfg.ap_pass);
     LOG_I("[WiFi] AP started: %s, IP: %s, ok=%s\n", 
         ap_name.c_str(), WiFi.softAPIP().toString().c_str(), ok ? "YES" : "NO");
     
@@ -136,7 +136,7 @@ static void wifi_connect() {
         // Switch to AP+STA (keep existing AP, add STA)
         WiFi.mode(WIFI_AP_STA);
         // Re-ensure AP is running after mode change
-        WiFi.softAP(ap_name.c_str(), WIFI_AP_PASS);
+        WiFi.softAP(ap_name.c_str(), cfg.ap_pass);
         LOG_I("[WiFi] Mode: AP+STA (always reachable via AP)\n");
     } else {
         WiFi.mode(WIFI_STA);
@@ -168,7 +168,7 @@ static void wifi_maintain() {
         if (WiFi.getMode() != WIFI_AP_STA && WiFi.getMode() != WIFI_AP) {
             WiFi.mode(WIFI_AP_STA);
             String ap_name = cfg.ap_name[0] ? String(cfg.ap_name) : String(cfg.hostname) + "-" + String((uint32_t)ESP.getEfuseMac(), HEX);
-            WiFi.softAP(ap_name.c_str(), WIFI_AP_PASS);
+            WiFi.softAP(ap_name.c_str(), cfg.ap_pass);
         }
     }
     

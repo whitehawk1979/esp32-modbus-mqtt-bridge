@@ -225,7 +225,7 @@ h2{color:#f0883e;background:#161b22;padding:8px 12px;border-radius:6px;margin:16
 </style></head><body>)rawliteral";
 
     html += "<h1>&#9889; " + String(cfg.hostname) + "</h1>";
-    html += "<div class=\"nav\"><a class=\"active\" href=\"/\">Státusz</a><a href=\"/config\">Beállítások</a><a href=\"/pins\">Pinek</a><a href=\"/modules\">Modulok</a><a href=\"/ota\">OTA</a></div>";
+    html += "<div class=\"nav\"><a class=\"active\" href=\"/\">Státusz</a><a href=\"/config\">Beállítások</a><a href=\"/pins\">Pinek</a><a href=\"/modules\">Modulok</a><a href=\"/ota\">OTA</a><a href=\"/admin\">Admin</a></div>";
     
     // Network — Dual stack display (both interfaces always visible)
     html += "<h2>&#128279; Hálózat</h2><div class=\"card\">";
@@ -405,7 +405,7 @@ button:hover{background:#2ea043}
 </style>
 </head><body>
 <h1>&#9889; Beállítások</h1>
-<div class="nav"><a href="/">Státusz</a><a class="active" href="/config">Beállítások</a><a href="/pins">Pinek</a><a href="/modules">Modulok</a><a href="/ota">OTA</a></div>
+<div class="nav"><a href="/">Státusz</a><a class="active" href="/config">Beállítások</a><a href="/pins">Pinek</a><a href="/modules">Modulok</a><a href="/ota">OTA</a><a href="/admin">Admin</a></div>
 <div class="pri"><b>&#128279; LAN elsődleges — WiFi automatikus fallback</b><br><span class="note">LAN mindig preferált. Ha leáll, WiFi átveszi. Ha LAN visszajön, automatikusan visszaáll.</span></div>
 <form action="/save" method="POST">)rawliteral";
 
@@ -441,6 +441,7 @@ button:hover{background:#2ea043}
     html += "<div class=\"fm\"><label>SSID</label><input name=\"ssid\" value=\"" + String(cfg.wifi_ssid) + "\" placeholder=\"WiFi neve\"></div>";
     html += "<div class=\"fm\"><label>Jelszó</label><input type=\"password\" name=\"wpass\" value=\"" + String(cfg.wifi_pass) + "\" placeholder=\"WiFi jelszó\"></div>";
     html += "<div class=\"fm\"><label>AP Név</label><input name=\"apn\" value=\"" + String(cfg.ap_name) + "\" placeholder=\"Üres = automatikus (hostname-MAC)\"></div>";
+    html += "<div class=\"fm\"><label>AP Jelszó</label><input type=\"password\" name=\"appass\" value=\"" + String(cfg.ap_pass) + "\" placeholder=\"12345678\"><p class=\"note\">Min. 8 karakter. Mentés után az AP azonnal újraindul az új jelszóval.</p></div>";
     
     html += "<div class=\"radio\"><label><input type=\"radio\" name=\"wdhcp\" value=\"1\" " + String(cfg.wifi_dhcp?"checked":"") + " onchange=\"toggleWifiStatic()\"> DHCP (automatikus)</label>";
     html += "<label><input type=\"radio\" name=\"wdhcp\" value=\"0\" " + String(!cfg.wifi_dhcp?"checked":"") + " onchange=\"toggleWifiStatic()\"> Kézi (statikus IP)</label></div>";
@@ -543,6 +544,7 @@ static void handleSave() {
     if (web.hasArg("ssid"))       nv.putString(NV_KEY_WIFI_SSID, web.arg("ssid"));
     if (web.hasArg("wpass"))      nv.putString(NV_KEY_WIFI_PASS, web.arg("wpass"));
     if (web.hasArg("apn"))        nv.putString(NV_KEY_AP_NAME, web.arg("apn"));
+    if (web.hasArg("appass"))    nv.putString(NV_KEY_AP_PASS, web.arg("appass"));
     if (web.hasArg("wifimode"))   nv.putUChar(NV_KEY_WIFI_MODE, web.arg("wifimode").toInt());
     if (web.hasArg("wdhcp"))      nv.putBool(NV_KEY_WIFI_DHCP, web.arg("wdhcp") == "1");
     if (web.hasArg("wip"))        nv.putString(NV_KEY_WIFI_IP, web.arg("wip"));
@@ -644,7 +646,7 @@ button:hover{background:#2ea043}
 </style>
 </head><body>
 <h1>&#128295; GPIO Pinek</h1>
-<div class="nav"><a href="/">Státusz</a><a href="/config">Beállítások</a><a class="active" href="/pins">Pinek</a><a href="/modules">Modulok</a><a href="/ota">OTA</a></div>
+<div class="nav"><a href="/">Státusz</a><a href="/config">Beállítások</a><a class="active" href="/pins">Pinek</a><a href="/modules">Modulok</a><a href="/ota">OTA</a><a href="/admin">Admin</a></div>
 <p class="note">-1 = nem használt / letiltott. A pinek megváltoztatása után újraindítás szükséges!</p>
 <form action="/savepins" method="POST">)rawliteral";
 
@@ -766,7 +768,7 @@ function toggleRelay(addr,relay,curState){
 </script>
 </head><body>
 <h1>&#128268; Modbus Modulok</h1>
-<div class="nav"><a href="/">Státusz</a><a href="/config">Beállítások</a><a href="/pins">Pinek</a><a class="active" href="/modules">Modulok</a><a href="/ota">OTA</a></div>)rawliteral";
+<div class="nav"><a href="/">Státusz</a><a href="/config">Beállítások</a><a href="/pins">Pinek</a><a class="active" href="/modules">Modulok</a><a href="/ota">OTA</a><a href="/admin">Admin</a></div>)rawliteral";
 
     if (!scan_active) {
         html += "<form action=\"/rescan\" method=\"POST\" style=\"display:inline;margin-bottom:8px\"><button type=\"submit\" style=\"background:#1f6feb\">🔄 Újrascan</button></form>";
@@ -1422,7 +1424,7 @@ static void handleApiLan() {
 // NVRAM keys to export — MUST match NV_KEY_* defines in modbus_mqtt_ha_bridge.h
 // type: s=string, u=uint, U=UShort, B=UChar, b=bool, i=int
 static const struct { const char* key; char type; } BACKUP_KEYS[] = {
-    {"hostname",'s'}, {"ssid",'s'}, {"wpass",'s'}, {"apn",'s'},
+    {"hostname",'s'}, {"ssid",'s'}, {"wpass",'s'}, {"apn",'s'}, {"appass",'s'},
     {"wifimode",'B'}, {"wdhcp",'b'},
     {"wip",'s'}, {"wgw",'s'}, {"wmask",'s'}, {"wdns",'s'},
     {"ethen",'b'}, {"edhcp",'b'}, {"etype",'B'},
@@ -1468,6 +1470,7 @@ static void handleApiBackup() {
     doc["wpass"] = "***";
     doc["mpass"] = "***";
     doc["wauthp"] = "***";
+    doc["appass"] = "***";
     doc["passwords_masked"] = true;
 
     // Module list entries
@@ -1578,12 +1581,180 @@ static void handleApiRestore() {
 }
 
 // ─── Init & Loop ───────────────────────────────────────────────
+// ─── Admin Panel ────────────────────────────────────────────────
+static void handleAdmin() {
+    if (!web_auth_ok()) return;
+
+    String html;
+    html.reserve(3000);
+    html = R"rawliteral(<!DOCTYPE html><html lang="hu"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Modbus-MQTT Bridge — Admin</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#0d1117;color:#c9d1d9;padding:12px;font-size:15px}
+h1{color:#58a6ff;font-size:1.3em;margin:8px 0}
+h2{color:#f0883e;background:#161b22;padding:8px 12px;border-radius:6px;margin:16px 0 8px;font-size:1.05em}
+.fm{margin-bottom:8px}
+label{display:block;font-weight:600;color:#7ee787;margin-bottom:2px;font-size:14px}
+input{width:100%;padding:8px;border:1px solid #30363d;border-radius:4px;background:#0d1117;color:#c9d1d9;font-size:15px}
+input:focus{outline:none;border-color:#58a6ff}
+.chk{display:flex;align-items:center;gap:6px;margin:6px 0}
+.chk label{margin:0;font-weight:normal;color:#c9d1d9;cursor:pointer}
+.chk input{width:auto;accent-color:#58a6ff}
+.row{display:flex;gap:8px}
+.row .fm{flex:1}
+.btn{background:#238636;color:white;border:none;padding:10px 20px;border-radius:6px;font-size:16px;cursor:pointer;margin:10px 2px}
+.btn:hover{background:#2ea043}
+.btn.rst{background:#da3633}
+.btn.rst:hover{background:#f85149}
+.note{color:#8b949e;font-size:12px;margin:2px 0 8px}
+.pri{background:#161b22;border:1px solid #f0883e;border-radius:6px;padding:12px;margin:8px 0}
+.pri b{color:#f0883e}
+.nav{display:flex;gap:8px;margin:8px 0}
+.nav a{background:#21262d;color:#58a6ff;padding:8px 16px;border-radius:6px;text-decoration:none;font-size:14px}
+.nav a:hover{background:#30363d}
+.nav a.active{background:#238636;color:white}
+.foot{text-align:center;color:#484f58;font-size:11px;margin-top:16px;border-top:1px solid #21262d;padding-top:8px}
+</style></head><body>
+<h1>&#128272; Admin</h1>
+<div class="nav"><a href="/">Státusz</a><a href="/config">Beállítások</a><a href="/pins">Pinek</a><a href="/modules">Modulok</a><a href="/ota">OTA</a><a class="active" href="/admin">Admin</a></div>
+<div class="pri"><b>&#9888; Figyelem!</b> Itt jelszavakat módosítasz. Ha elfelejted a jelszót, csak USB flash-sel lehet visszaállítani!</div>
+<form action="/saveadmin" method="POST">
+<h2>&#128100; Admin jelszó (Digest Auth)</h2>
+<div class="chk"><label>Felhasználó: <b>admin</b> (nem módosítható)</label></div>
+<div class="fm"><label>Jelenlegi jelszó</label><input type="password" name="curpass" placeholder="Írd be a jelenlegi jelszót" required></div>
+<div class="row"><div class="fm"><label>Új jelszó</label><input type="password" name="newpass" placeholder="Új jelszó" required></div>
+<div class="fm"><label>Megerősítés</label><input type="password" name="newpass2" placeholder="Új jelszó újra" required></div></div>
+<p class="note">Min. 4 karakter. Üresen hagyva = auth kikapcsolva (nem ajánlott).</p>
+<div><button type="submit" class="btn" name="action" value="changepass">Jelszó módosítása</button>
+<button type="submit" class="btn rst" name="action" value="resetpass">Alapértelmezett (admin)</button></div>
+
+<h2>&#128225; AP jelszó (WiFi Access Point)</h2>
+<div class="fm"><label>AP jelszó</label><input type="password" name="appass" value=")rawliteral";
+
+    // Show AP pass as dots (current value)
+    html += String(cfg.ap_pass);
+    html += R"rawliteral(" placeholder="12345678"></div>
+<p class="note">Az AP jelszó a saját WiFi hálózatod védelme. Min. 8 karakter! Alapértelmezett: 12345678</p>
+<div><button type="submit" class="btn" name="action" value="changeap">AP jelszó mentése</button>
+<button type="submit" class="btn rst" name="action" value="resetap">Alapértelmezett (12345678)</button></div>
+</form>
+<div class="foot">Modbus-MQTT Bridge v)rawliteral";
+
+    html += String(FIRMWARE_VERSION);
+    html += R"rawliteral(</div></body></html>)rawliteral";
+
+    web.send(200, "text/html", html);
+}
+
+static void handleSaveAdmin() {
+    if (!web_auth_ok()) return;
+
+    String action = web.arg("action");
+
+    if (action == "changepass" || action == "resetpass") {
+        // Change admin password
+        String curpass  = web.arg("curpass");
+        String newpass  = web.arg("newpass");
+        String newpass2 = web.arg("newpass2");
+
+        // Verify current password
+        if (curpass != String(cfg.web_pass)) {
+            web.send(403, "text/html", R"rawliteral(<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Hiba</title>
+<style>body{font-family:sans-serif;background:#0d1117;color:#c9d1d9;text-align:center;padding:40px}
+.err{color:#f85149;font-size:28px}p{color:#8b949e}a{color:#58a6ff}</style></head>
+<body><h1 class="err">&#10060; Hibás jelenlegi jelszó!</h1><p>A megadott jelszó nem egyezik.</p>
+<a href="/admin">Vissza</a></body></html>)rawliteral");
+            return;
+        }
+
+        if (action == "resetpass") {
+            // Reset to factory default
+            strlcpy(cfg.web_pass, "admin", sizeof(cfg.web_pass));
+        } else {
+            // Validate new password
+            if (newpass != newpass2) {
+                web.send(400, "text/html", R"rawliteral(<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Hiba</title>
+<style>body{font-family:sans-serif;background:#0d1117;color:#c9d1d9;text-align:center;padding:40px}
+.err{color:#f85149;font-size:28px}p{color:#8b949e}a{color:#58a6ff}</style></head>
+<body><h1 class="err">&#10060; A két jelszó nem egyezik!</h1><p>Próbáld újra.</p>
+<a href="/admin">Vissza</a></body></html>)rawliteral");
+                return;
+            }
+            if (newpass.length() < 4) {
+                web.send(400, "text/html", R"rawliteral(<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Hiba</title>
+<style>body{font-family:sans-serif;background:#0d1117;color:#c9d1d9;text-align:center;padding:40px}
+.err{color:#f85149;font-size:28px}p{color:#8b949e}a{color:#58a6ff}</style></head>
+<body><h1 class="err">&#10060; Túl rövid jelszó!</h1><p>Min. 4 karakter szükséges.</p>
+<a href="/admin">Vissza</a></body></html>)rawliteral");
+                return;
+            }
+            strlcpy(cfg.web_pass, newpass.c_str(), sizeof(cfg.web_pass));
+        }
+
+        // Save to NVRAM
+        Preferences nv;
+        nv.begin(NV_NAMESPACE, false);
+        nv.putString(NV_KEY_WEB_PASS, cfg.web_pass);
+        nv.end();
+
+        LOG_ILN("[ADMIN] Web auth password changed");
+        web.send(200, "text/html", R"rawliteral(<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Mentve</title>
+<style>body{font-family:sans-serif;background:#0d1117;color:#c9d1d9;text-align:center;padding:40px}
+.ok{color:#3fb950;font-size:28px}p{color:#8b949e}a{color:#58a6ff}</style></head>
+<body><h1 class="ok">&#10004; Admin jelszó elmentve!</h1><p>A változás azonnal érvényes.</p>
+<a href="/admin">Vissza</a></body></html>)rawliteral");
+        return;
+    }
+
+    if (action == "changeap" || action == "resetap") {
+        // Change AP password
+        if (action == "resetap") {
+            strlcpy(cfg.ap_pass, "12345678", sizeof(cfg.ap_pass));
+        } else {
+            String appass = web.arg("appass");
+            if (appass.length() < 8) {
+                web.send(400, "text/html", R"rawliteral(<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Hiba</title>
+<style>body{font-family:sans-serif;background:#0d1117;color:#c9d1d9;text-align:center;padding:40px}
+.err{color:#f85149;font-size:28px}p{color:#8b949e}a{color:#58a6ff}</style></head>
+<body><h1 class="err">&#10060; Túl rövid AP jelszó!</h1><p>Min. 8 karakter szükséges a WPA2 miatt.</p>
+<a href="/admin">Vissza</a></body></html>)rawliteral");
+                return;
+            }
+            strlcpy(cfg.ap_pass, appass.c_str(), sizeof(cfg.ap_pass));
+        }
+
+        // Update AP immediately
+        String ap_name = cfg.ap_name[0] ? String(cfg.ap_name) : String(cfg.hostname) + "-" + String((uint32_t)ESP.getEfuseMac(), HEX);
+        WiFi.softAP(ap_name.c_str(), cfg.ap_pass);
+
+        // Save to NVRAM
+        Preferences nv;
+        nv.begin(NV_NAMESPACE, false);
+        nv.putString(NV_KEY_AP_PASS, cfg.ap_pass);
+        nv.end();
+
+        LOG_ILN("[ADMIN] AP password changed, softAP updated");
+        web.send(200, "text/html", R"rawliteral(<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Mentve</title>
+<style>body{font-family:sans-serif;background:#0d1117;color:#c9d1d9;text-align:center;padding:40px}
+.ok{color:#3fb950;font-size:28px}p{color:#8b949e}a{color:#58a6ff}</style></head>
+<body><h1 class="ok">&#10004; AP jelszó elmentve!</h1><p>Az AP azonnal újraindult az új jelszóval.</p>
+<a href="/admin">Vissza</a></body></html>)rawliteral");
+        return;
+    }
+
+    web.send(400, "text/html", "Bad request");
+}
+
 void web_server_init() {
     web.on("/", HTTP_GET, handleStatus);
     web.on("/scanstatus", HTTP_GET, handleApiScan);
     web.on("/config", HTTP_GET, handleConfig);
     web.on("/pins", HTTP_GET, handlePins);
     web.on("/modules", HTTP_GET, handleModules);
+    web.on("/admin", HTTP_GET, handleAdmin);
+    web.on("/saveadmin", HTTP_POST, handleSaveAdmin);
     web.on("/ota", HTTP_GET, handleOtaPage);
     web.on("/otaupload", HTTP_POST, handleOtaUpload, handleOtaUpload);
     web.on("/save", HTTP_POST, handleSave);

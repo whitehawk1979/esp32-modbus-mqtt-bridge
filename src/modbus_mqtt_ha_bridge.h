@@ -132,6 +132,7 @@ enum NetInterface : uint8_t {
 #define NV_KEY_WIFI_SSID  "ssid"
 #define NV_KEY_WIFI_PASS  "wpass"
 #define NV_KEY_AP_NAME   "apn"
+#define NV_KEY_AP_PASS   "appass"
 #define NV_KEY_WIFI_IP    "wip"
 #define NV_KEY_WIFI_GW    "wgw"
 #define NV_KEY_WIFI_MASK  "wmask"
@@ -260,6 +261,7 @@ struct AppConfig {
     char wifi_ssid[64];
     char wifi_pass[64];
     char ap_name[33];          // Custom AP SSID (empty = hostname-MACHEX auto)
+    char ap_pass[64];          // AP password (default: 12345678)
     bool wifi_dhcp;
     char wifi_ip[16];
     char wifi_gw[16];
