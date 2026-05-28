@@ -59,22 +59,118 @@ static void cfg_defaults() {
 
 void config_init() { cfg_defaults(); }
 
+// ── Factory defaults: auto-provision NVRAM on first boot after erase ──
+// After erase_flash every NVRAM key is empty. We populate factory values
+// so the device boots fully configured (WiFi+LAN+MQTT+modules+auth+pins).
+static void factory_provision(Preferences &nv) {
+    bool dirty = false;
+
+    // ── WiFi ──
+    char buf[64];
+    nv.getString(NV_KEY_WIFI_SSID, buf, sizeof(buf));
+    if (strlen(buf) == 0) { nv.putString(NV_KEY_WIFI_SSID, "Air 2"); dirty = true; }
+    nv.getString(NV_KEY_WIFI_PASS, buf, sizeof(buf));
+    if (strlen(buf) == 0) { nv.putString(NV_KEY_WIFI_PASS, "decembertizenhat"); dirty = true; }
+    if (!nv.isKey(NV_KEY_WIFI_MODE)) { nv.putUChar(NV_KEY_WIFI_MODE, 0); dirty = true; }
+    if (!nv.isKey(NV_KEY_WIFI_DHCP)) { nv.putBool(NV_KEY_WIFI_DHCP, true); dirty = true; }
+
+    // ── LAN (W5500 enabled by default) ──
+    if (!nv.isKey(NV_KEY_ETH_EN)) { nv.putBool(NV_KEY_ETH_EN, true); dirty = true; }
+    if (!nv.isKey(NV_KEY_ETH_DHCP)) { nv.putBool(NV_KEY_ETH_DHCP, true); dirty = true; }
+    if (!nv.isKey(NV_KEY_ETH_TYPE)) { nv.putUChar(NV_KEY_ETH_TYPE, 1); dirty = true; }  // W5500
+
+    // ── MQTT ──
+    nv.getString(NV_KEY_MQTT_HOST, buf, sizeof(buf));
+    if (strlen(buf) == 0) { nv.putString(NV_KEY_MQTT_HOST, "192.168.1.43"); dirty = true; }
+    if (!nv.isKey(NV_KEY_MQTT_PORT)) { nv.putUShort(NV_KEY_MQTT_PORT, 1883); dirty = true; }
+    nv.getString(NV_KEY_MQTT_USER, buf, sizeof(buf));
+    if (strlen(buf) == 0) { nv.putString(NV_KEY_MQTT_USER, "mqtt"); dirty = true; }
+    nv.getString(NV_KEY_MQTT_PASS, buf, sizeof(buf));
+    if (strlen(buf) == 0) { nv.putString(NV_KEY_MQTT_PASS, "2009December16"); dirty = true; }
+    nv.getString(NV_KEY_MQTT_PREFIX, buf, sizeof(buf));
+    if (strlen(buf) == 0) { nv.putString(NV_KEY_MQTT_PREFIX, "modbusmqtt"); dirty = true; }
+    if (!nv.isKey(NV_KEY_MQTT_TLS)) { nv.putBool(NV_KEY_MQTT_TLS, false); dirty = true; }
+
+    // ── HA Discovery ──
+    if (!nv.isKey(NV_KEY_HA_DISC)) { nv.putBool(NV_KEY_HA_DISC, true); dirty = true; }
+
+    // ── Modbus ──
+    if (!nv.isKey(NV_KEY_MB_BAUD))    { nv.putUInt(NV_KEY_MB_BAUD, 9600); dirty = true; }
+    if (!nv.isKey(NV_KEY_MB_START))   { nv.putUChar(NV_KEY_MB_START, 1); dirty = true; }
+    if (!nv.isKey(NV_KEY_MB_END))     { nv.putUChar(NV_KEY_MB_END, 247); dirty = true; }
+    if (!nv.isKey(NV_KEY_MB_PARITY))  { nv.putUChar(NV_KEY_MB_PARITY, 0); dirty = true; }
+    if (!nv.isKey(NV_KEY_MB_PROFILE)) { nv.putUChar(NV_KEY_MB_PROFILE, MB_PROFILE_KC868_HA); dirty = true; }
+    if (!nv.isKey(NV_KEY_MB_REG_COIL)) { nv.putUShort(NV_KEY_MB_REG_COIL, 0); dirty = true; }
+    if (!nv.isKey(NV_KEY_MB_REG_DI))  { nv.putUShort(NV_KEY_MB_REG_DI, 1); dirty = true; }
+    if (!nv.isKey(NV_KEY_MB_POLL_MS)) { nv.putUShort(NV_KEY_MB_POLL_MS, 500); dirty = true; }
+    if (!nv.isKey(NV_KEY_VIRTUAL_MOD)) { nv.putBool(NV_KEY_VIRTUAL_MOD, false); dirty = true; }
+
+    // ── TCP Modbus bridge ──
+    if (!nv.isKey(NV_KEY_TCP_EN))   { nv.putBool(NV_KEY_TCP_EN, true); dirty = true; }
+    if (!nv.isKey(NV_KEY_TCP_PORT)) { nv.putUShort(NV_KEY_TCP_PORT, 502); dirty = true; }
+
+    // ── Hostname ──
+    nv.getString(NV_KEY_HOSTNAME, buf, sizeof(buf));
+    if (strlen(buf) == 0) { nv.putString(NV_KEY_HOSTNAME, "modbusmqtt"); dirty = true; }
+
+    // ── Web Auth ──
+    if (!nv.isKey(NV_KEY_WEB_AUTH)) { nv.putBool(NV_KEY_WEB_AUTH, true); dirty = true; }
+    nv.getString(NV_KEY_WEB_PASS, buf, sizeof(buf));
+    if (strlen(buf) == 0) { nv.putString(NV_KEY_WEB_PASS, "admin"); dirty = true; }
+
+    // ── KinCony F16 module (addr=200) ──
+    if (!nv.isKey("mlist_n"))  { nv.putString("mlist_n", "1"); dirty = true; }
+    nv.getString("mn200", buf, sizeof(buf));
+    if (strlen(buf) == 0) { nv.putString("mn200", "KinCony F16"); dirty = true; }
+    nv.getString("hn200", buf, sizeof(buf));
+    if (strlen(buf) == 0) { nv.putString("hn200", "KinCony F16"); dirty = true; }
+    nv.getString("ar200", buf, sizeof(buf));
+    if (strlen(buf) == 0) { nv.putString("ar200", "Gepeszet"); dirty = true; }
+    // Relay names
+    const char* relay_names[] = {"Alagsor","Utofutes","Foldszint","Ventilokonvektorok","Manzard","MV recirk"};
+    for (int i = 0; i < 6; i++) {
+        char key[16]; snprintf(key, sizeof(key), "rn200_%d", i);
+        nv.getString(key, buf, sizeof(buf));
+        if (strlen(buf) == 0) { nv.putString(key, relay_names[i]); dirty = true; }
+    }
+    // DI names
+    const char* di_names[] = {"Kapcsolo 1","Kapcsolo 2","Kapcsolo 3","Kapcsolo 4","Kapcsolo 5","Kapcsolo 6"};
+    for (int i = 0; i < 6; i++) {
+        char key[16]; snprintf(key, sizeof(key), "dn200_%d", i);
+        nv.getString(key, buf, sizeof(buf));
+        if (strlen(buf) == 0) { nv.putString(key, di_names[i]); dirty = true; }
+    }
+    // Rooms list
+    nv.getString("rooms", buf, sizeof(buf));
+    if (strlen(buf) == 0) { nv.putString("rooms", "Gepeszet"); dirty = true; }
+
+    // ── GPIO Pins (Waveshare ESP32-S3-ETH V1.0 = W5500) ──
+    if (!nv.isKey(NV_KEY_PIN_RS485_RX))   { nv.putInt(NV_KEY_PIN_RS485_RX, 44); dirty = true; }
+    if (!nv.isKey(NV_KEY_PIN_RS485_TX))   { nv.putInt(NV_KEY_PIN_RS485_TX, 43); dirty = true; }
+    if (!nv.isKey(NV_KEY_PIN_RS485_DE))   { nv.putInt(NV_KEY_PIN_RS485_DE, 4); dirty = true; }
+    if (!nv.isKey(NV_KEY_PIN_LED))        { nv.putInt(NV_KEY_PIN_LED, 2); dirty = true; }
+    if (!nv.isKey(NV_KEY_PIN_BTN))        { nv.putInt(NV_KEY_PIN_BTN, 0); dirty = true; }
+    if (!nv.isKey(NV_KEY_PIN_ETH_MOSI))   { nv.putInt(NV_KEY_PIN_ETH_MOSI, 11); dirty = true; }
+    if (!nv.isKey(NV_KEY_PIN_ETH_MISO))   { nv.putInt(NV_KEY_PIN_ETH_MISO, 13); dirty = true; }
+    if (!nv.isKey(NV_KEY_PIN_ETH_SCLK))   { nv.putInt(NV_KEY_PIN_ETH_SCLK, 12); dirty = true; }
+    if (!nv.isKey(NV_KEY_PIN_ETH_CS))     { nv.putInt(NV_KEY_PIN_ETH_CS, 10); dirty = true; }
+    if (!nv.isKey(NV_KEY_PIN_ETH_INT))    { nv.putInt(NV_KEY_PIN_ETH_INT, 14); dirty = true; }
+    if (!nv.isKey(NV_KEY_PIN_ETH_RST))    { nv.putInt(NV_KEY_PIN_ETH_RST, 9); dirty = true; }
+
+    if (dirty) Serial.println("[NV] Factory defaults provisioned");
+}
+
 void config_load() {
     Preferences nv;
-    nv.begin(NV_NAMESPACE, false);  // RW mode needed for fallback save
+    nv.begin(NV_NAMESPACE, false);  // RW mode for factory provisioning
     
+    // Auto-provision factory defaults if NVRAM empty (e.g. after erase_flash)
+    factory_provision(nv);
+    
+    // ── Read all values from NVRAM ──
     nv.getString(NV_KEY_WIFI_SSID, cfg.wifi_ssid, sizeof(cfg.wifi_ssid));
     nv.getString(NV_KEY_WIFI_PASS, cfg.wifi_pass, sizeof(cfg.wifi_pass));
     nv.getString(NV_KEY_AP_NAME, cfg.ap_name, sizeof(cfg.ap_name));
-    
-    // Hardcoded fallback: if NVRAM is empty or WiFi pass missing (after erase/restore),
-    // use factory WiFi so device auto-connects to home router
-    if (strlen(cfg.wifi_ssid) == 0 || strlen(cfg.wifi_pass) == 0) {
-        if (strlen(cfg.wifi_ssid) == 0) strlcpy(cfg.wifi_ssid, "Air 2", sizeof(cfg.wifi_ssid));
-        strlcpy(cfg.wifi_pass, "decembertizenhat", sizeof(cfg.wifi_pass));
-        nv.putString(NV_KEY_WIFI_SSID, cfg.wifi_ssid);
-        nv.putString(NV_KEY_WIFI_PASS, cfg.wifi_pass);
-    }
     cfg.wifi_mode = nv.getUChar(NV_KEY_WIFI_MODE, 0);
     cfg.wifi_dhcp = nv.getBool(NV_KEY_WIFI_DHCP, true);
     nv.getString(NV_KEY_WIFI_IP, cfg.wifi_ip, sizeof(cfg.wifi_ip));
@@ -82,13 +178,13 @@ void config_load() {
     nv.getString(NV_KEY_WIFI_MASK, cfg.wifi_mask, sizeof(cfg.wifi_mask));
     nv.getString(NV_KEY_WIFI_DNS, cfg.wifi_dns, sizeof(cfg.wifi_dns));
     
-    cfg.lan_enabled = nv.getBool(NV_KEY_ETH_EN, false);
+    cfg.lan_enabled = nv.getBool(NV_KEY_ETH_EN, true);   // default ON
     cfg.lan_dhcp = nv.getBool(NV_KEY_ETH_DHCP, true);
     nv.getString(NV_KEY_ETH_IP, cfg.lan_ip, sizeof(cfg.lan_ip));
     nv.getString(NV_KEY_ETH_GW, cfg.lan_gw, sizeof(cfg.lan_gw));
     nv.getString(NV_KEY_ETH_MASK, cfg.lan_mask, sizeof(cfg.lan_mask));
     nv.getString(NV_KEY_ETH_DNS, cfg.lan_dns, sizeof(cfg.lan_dns));
-    cfg.lan_type = nv.getUChar(NV_KEY_ETH_TYPE, 0);
+    cfg.lan_type = nv.getUChar(NV_KEY_ETH_TYPE, 1);     // default W5500
     
     nv.getString(NV_KEY_MQTT_HOST, cfg.mqtt_host, sizeof(cfg.mqtt_host));
     cfg.mqtt_port = nv.getUShort(NV_KEY_MQTT_PORT, 1883);
@@ -112,7 +208,6 @@ void config_load() {
     cfg.tcp_enabled = nv.getBool(NV_KEY_TCP_EN, true);
     cfg.tcp_port = nv.getUShort(NV_KEY_TCP_PORT, 502);
     
-    // GPIO Pins
     cfg.pin_rs485_rx   = (int8_t)nv.getInt(NV_KEY_PIN_RS485_RX, 44);
     cfg.pin_rs485_tx   = (int8_t)nv.getInt(NV_KEY_PIN_RS485_TX, 43);
     cfg.pin_rs485_de   = (int8_t)nv.getInt(NV_KEY_PIN_RS485_DE, 4);
@@ -125,16 +220,9 @@ void config_load() {
     cfg.pin_eth_int    = (int8_t)nv.getInt(NV_KEY_PIN_ETH_INT, 14);
     cfg.pin_eth_rst    = (int8_t)nv.getInt(NV_KEY_PIN_ETH_RST, 9);
     nv.getString(NV_KEY_HOSTNAME, cfg.hostname, sizeof(cfg.hostname));
-    // Fallback if NVRAM empty
-    if (strlen(cfg.hostname) == 0) strlcpy(cfg.hostname, "modbusmqtt", sizeof(cfg.hostname));
     
-    // Web authentication (default: admin/admin)
     cfg.web_auth = nv.getBool(NV_KEY_WEB_AUTH, true);
     nv.getString(NV_KEY_WEB_PASS, cfg.web_pass, sizeof(cfg.web_pass));
-    if (strlen(cfg.web_pass) == 0) {
-        strlcpy(cfg.web_pass, "admin", sizeof(cfg.web_pass));
-        nv.putString(NV_KEY_WEB_PASS, cfg.web_pass);
-    }
     
     nv.end();
     config_print();
