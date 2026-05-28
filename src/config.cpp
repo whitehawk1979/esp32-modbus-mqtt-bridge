@@ -22,16 +22,26 @@ AppConfig cfg;
 // ─── Load defaults ─────────────────────────────────────────────
 static void cfg_defaults() {
     memset(&cfg, 0, sizeof(cfg));
-    cfg.wifi_mode = 0;       // AP+STA default
+    // ── WiFi: Air 2 AP+STA ──
+    strlcpy(cfg.wifi_ssid, "Air 2", sizeof(cfg.wifi_ssid));
+    strlcpy(cfg.wifi_pass, "decembertizenhat", sizeof(cfg.wifi_pass));
+    cfg.wifi_mode = 0;       // AP+STA
     cfg.wifi_dhcp = true;
-    cfg.lan_enabled = false;
+    // ── LAN: W5500 enabled ──
+    cfg.lan_enabled = true;
     cfg.lan_dhcp = true;
-    cfg.lan_type = 0;
+    cfg.lan_type = 1;        // W5500
     cfg.active_if = NET_IF_NONE;
+    // ── MQTT ──
     strlcpy(cfg.mqtt_host, "192.168.1.43", sizeof(cfg.mqtt_host));
     cfg.mqtt_port = 1883;
+    strlcpy(cfg.mqtt_user, "mqtt", sizeof(cfg.mqtt_user));
+    strlcpy(cfg.mqtt_pass, "2009December16", sizeof(cfg.mqtt_pass));
     strlcpy(cfg.mqtt_prefix, "modbusmqtt", sizeof(cfg.mqtt_prefix));
+    cfg.mqtt_tls = false;
+    // ── HA Discovery ──
     cfg.ha_discovery = true;
+    // ── Modbus ──
     cfg.mb_baud = 9600;
     cfg.mb_scan_start = 1;
     cfg.mb_scan_end = 247;
@@ -40,9 +50,11 @@ static void cfg_defaults() {
     cfg.mb_reg_coil_start = 0;
     cfg.mb_reg_di_start = 1;
     cfg.mb_poll_ms = 500;
+    cfg.virtual_module = false;
+    // ── TCP bridge ──
     cfg.tcp_enabled = true;
     cfg.tcp_port = 502;
-    // GPIO Pin defaults
+    // ── GPIO Pins (Waveshare ESP32-S3-ETH V1.0 = W5500) ──
     cfg.pin_rs485_rx   = 44;
     cfg.pin_rs485_tx   = 43;
     cfg.pin_rs485_de   = 4;
@@ -54,7 +66,10 @@ static void cfg_defaults() {
     cfg.pin_eth_cs     = 10;
     cfg.pin_eth_int    = 14;
     cfg.pin_eth_rst    = 9;
+    // ── Hostname + Auth ──
     strlcpy(cfg.hostname, "modbusmqtt", sizeof(cfg.hostname));
+    cfg.web_auth = true;
+    strlcpy(cfg.web_pass, "admin", sizeof(cfg.web_pass));
 }
 
 void config_init() { cfg_defaults(); }
