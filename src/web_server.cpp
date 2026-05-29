@@ -33,12 +33,54 @@ WebServer web(80);
 
 // ─── Web Authentication Helper ─────────────────────────────────
 // Check if web authentication is required and validate
+// ─── Auth Rate Limiting ──────────────────────────────────────────
+#define AUTH_MAX_ATTEMPTS   5
+#define AUTH_LOCKOUT_MS     30000   // 30s lockout after 5 failed attempts
+
+static uint8_t  auth_fail_count = 0;
+static uint32_t auth_lockout_until = 0;
+static uint32_t auth_last_fail = 0;
+
 bool web_auth_ok() {
     if (!cfg.web_auth || strlen(cfg.web_pass) == 0) return true;  // Auth disabled
+    
+    // ── Rate limiting ───────────────────────────────────────
+    uint32_t now = millis();
+    if (auth_lockout_until > 0 && now < auth_lockout_until) {
+        web.send(429, "text/plain", "Too Many Attempts — try again later");
+        return false;
+    }
+    // Reset counter if lockout expired
+    if (auth_lockout_until > 0 && now >= auth_lockout_until) {
+        auth_fail_count = 0;
+        auth_lockout_until = 0;
+    }
+    // Reset counter if last fail was >5 min ago (natural cooldown)
+    if (auth_fail_count > 0 && now - auth_last_fail > 300000) {
+        auth_fail_count = 0;
+    }
+    
     if (!web.authenticate("admin", cfg.web_pass)) {
+        auth_fail_count++;
+        auth_last_fail = millis();
+        
+        if (auth_fail_count >= AUTH_MAX_ATTEMPTS) {
+            auth_lockout_until = millis() + AUTH_LOCKOUT_MS;
+            LOG_E("[AUTH] ⚠ LOCKOUT: %u failed attempts, blocked for %us\n",
+                  auth_fail_count, AUTH_LOCKOUT_MS / 1000);
+            web.send(429, "text/plain", "Too Many Attempts — locked for 30s");
+            return false;
+        }
+        
+        LOG_E("[AUTH] Failed attempt %u/%u from %s\n",
+              auth_fail_count, AUTH_MAX_ATTEMPTS, web.client().remoteIP().toString().c_str());
         web.requestAuthentication(DIGEST_AUTH, "ModbusMQTT");
         return false;
     }
+    
+    // Successful auth — reset counters
+    auth_fail_count = 0;
+    auth_lockout_until = 0;
     return true;
 }
 
