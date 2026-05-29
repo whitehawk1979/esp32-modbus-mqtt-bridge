@@ -485,6 +485,9 @@ void setup() {
     config_init();
     config_load();
     
+    // ── Watchdog init (before anything else) ──
+    wdt_init();
+    
     // ── Set device hostname (mDNS, DHCP name, MQTT client ID) ──
     WiFi.setHostname(cfg.hostname);
     LOG_I("[SYS] Hostname: %s\n", cfg.hostname);
@@ -605,6 +608,9 @@ static void do_staged_init() {
 
 // ─── Main Loop ──────────────────────────────────────────────────
 void loop() {
+    // ── Feed watchdog ──────────────────────────────────────────
+    wdt_loop_tick_reset();
+    
     // ── Web server ALWAYS runs (even in AP-only mode) ────────────
     web_server_loop();
     
@@ -652,5 +658,9 @@ void loop() {
     
     check_rescan();
     update_status_led();
+    
+    // ── Watchdog health check ────────────────────────────────
+    wdt_check();
+    
     delay(1);
 }

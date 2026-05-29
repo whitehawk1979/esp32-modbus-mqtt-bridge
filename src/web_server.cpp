@@ -334,6 +334,7 @@ h2{color:#f0883e;background:#161b22;padding:8px 12px;border-radius:6px;margin:16
     html += "<div class=\"row\"><span class=\"key\">Firmware</span><span class=\"val\">v" + String(FIRMWARE_VERSION) + "</span></div>";
     html += "<div class=\"row\"><span class=\"key\">Uptime</span><span class=\"val\">" + uptimeStr() + "</span></div>";
     html += "<div class=\"row\"><span class=\"key\">Heap free</span><span class=\"val\">" + String(ESP.getFreeHeap() / 1024) + " KB</span></div>";
+    html += "<div class=\"row\"><span class=\"key\">WDT reboots</span><span class=\"val\">" + String(wdt_get_reboots()) + "</span></div>";
     // Bridge system sensors
     {
         bool wifi_connected = (WiFi.status() == WL_CONNECTED);
@@ -1247,6 +1248,7 @@ static void handleApiStatus() {
     doc["uptime_s"] = millis() / 1000;
     doc["heap_free"] = ESP.getFreeHeap();
     doc["heap_free_kb"] = ESP.getFreeHeap() / 1024;
+    doc["wdt_reboots"] = wdt_get_reboots();
     doc["interface"] = cfg.active_if == NET_IF_LAN ? "LAN" : cfg.active_if == NET_IF_WIFI ? "WiFi" : "NONE";
     doc["ip"] = active_ip;
     // Dual-stack: always show both interfaces

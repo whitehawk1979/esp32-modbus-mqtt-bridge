@@ -384,6 +384,7 @@ void click_set_callback(ClickCallback cb);
 void mqtt_init();
 void mqtt_loop();
 bool mqtt_is_connected();
+void mqtt_force_disconnect();
 void mqtt_cleanup_discovery(Slave_Module *mod);
 void mqtt_publish_discovery(Slave_Module *mod);
 void mqtt_publish_relay_state(Slave_Module *mod, uint8_t relay_idx);
@@ -443,6 +444,14 @@ String config_get_di_name(uint8_t slave_addr, uint8_t idx);
 // ota_handler.cpp
 void ota_init();
 void ota_loop();
+
+// watchdog.cpp
+void wdt_init();
+void wdt_check();
+void wdt_loop_tick_reset();
+void wdt_notify_publish();
+void wdt_reboot(const char *reason);
+uint32_t wdt_get_reboots();
 
 // main.cpp
 void setup();

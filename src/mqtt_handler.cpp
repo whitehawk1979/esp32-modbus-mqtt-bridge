@@ -90,6 +90,13 @@ bool mqtt_is_connected() {
     return mqtt.connected();
 }
 
+void mqtt_force_disconnect() {
+    if (mqtt.connected()) {
+        mqtt.disconnect();
+        LOG_I("[MQTT] Force disconnected by watchdog\n");
+    }
+}
+
 void mqtt_init() {
     if (strlen(cfg.mqtt_host) == 0) {
         LOG_ELN("[MQTT] No broker configured!");
@@ -689,4 +696,7 @@ void mqtt_publish_bridge_state() {
     } else {
         mqtt.publish((prefix + "ip").c_str(), "unavailable", false);
     }
+    
+    // Notify watchdog that MQTT is alive
+    wdt_notify_publish();
 }
