@@ -465,6 +465,9 @@ void mqtt_publish_relay_state(Slave_Module *mod, uint8_t relay_idx) {
         String name_topic = topic_base(mod->slave_addr, "relay/" + String(relay_idx) + "/name");
         mqtt.publish(name_topic.c_str(), name.c_str(), true);
     }
+    
+    // Notify WebSocket clients
+    ws_notify_relay(mod, relay_idx);
 }
 
 // ─── Publish DI State ──────────────────────────────────────────
@@ -478,6 +481,9 @@ void mqtt_publish_di_state(Slave_Module *mod, uint8_t di_idx, bool state) {
         String name_topic = topic_base(mod->slave_addr, "di/" + String(di_idx) + "/name");
         mqtt.publish(name_topic.c_str(), name.c_str(), true);
     }
+    
+    // Notify WebSocket clients
+    ws_notify_di(mod, di_idx, state);
 }
 
 // ─── Publish Click Event (from callback) ────────────────────────

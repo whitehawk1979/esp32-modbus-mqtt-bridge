@@ -506,6 +506,9 @@ void setup() {
     // ── Start web server NOW — loop() will handle requests ──
     web_server_init();
     LOG_ILN("[SETUP] ✓ Web server running on AP IP");
+    
+    // ── Start WebSocket server on port 81 ──
+    ws_init();
     LOG_ILN("[SETUP] Remaining init continues in loop()...");
     
     enableCore0WDT();
@@ -613,6 +616,9 @@ void loop() {
     
     // ── Web server ALWAYS runs (even in AP-only mode) ────────────
     web_server_loop();
+    
+    // ── WebSocket real-time updates ────────────────────────────
+    ws_loop();
     
     // ── ArduinoOTA (PlatformIO espota) ────────────────────────
     ota_loop();

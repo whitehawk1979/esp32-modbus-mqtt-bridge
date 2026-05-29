@@ -453,6 +453,14 @@ void wdt_notify_publish();
 void wdt_reboot(const char *reason);
 uint32_t wdt_get_reboots();
 
+// ws_handler.cpp
+void ws_init();
+void ws_loop();
+void ws_notify_relay(Slave_Module *mod, uint8_t relay_idx);
+void ws_notify_di(Slave_Module *mod, uint8_t di_idx, bool state);
+void ws_notify_mqtt(bool connected);
+uint8_t ws_client_count_get();
+
 // main.cpp
 void setup();
 void loop();
