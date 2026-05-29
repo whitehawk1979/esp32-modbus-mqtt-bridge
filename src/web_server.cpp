@@ -245,6 +245,7 @@ static String roomSelectHtml(const String& field_name, const String& cur_area) {
 
 // ─── STATUS PAGE ───────────────────────────────────────────────
 static void handleStatus() {
+    if (!web_auth_ok()) return;
     String html;
     html.reserve(6000);  // Pre-allocate to reduce heap fragmentation
     html = R"rawliteral(<!DOCTYPE html><html lang="hu"><head>
@@ -412,6 +413,7 @@ h2{color:#f0883e;background:#161b22;padding:8px 12px;border-radius:6px;margin:16
 
 // ─── CONFIG PAGE ───────────────────────────────────────────────
 static void handleConfig() {
+    if (!web_auth_ok()) return;
     // Build form with current values pre-filled
     String html;
     html.reserve(8000);
@@ -510,7 +512,7 @@ button:hover{background:#2ea043}
     html += "<h2>&#128272; Web hitelesítés</h2>";
     html += "<div class=\"chk\"><input type=\"checkbox\" id=\"wauth\" name=\"wauth\" value=\"1\" " + String(cfg.web_auth?"checked":"") + "><label for=\"wauth\">Web hitelesítés bekapcsolása</label></div>";
     html += "<div class=\"fm\"><label>Auth jelszó</label><input type=\"password\" name=\"wauthp\" value=\"" + String(cfg.web_pass) + "\" placeholder=\"Üres = kikapcsolva\"></div>";
-    html += "<p class=\"note\">A hitelesítés védi az író műveleteket (relé, konfig, OTA). Olvasás (státusz) nyitva marad. Felhasználónév: admin</p>";
+    html += "<p class=\"note\">A hitelesítés védi a teljes felületet (minden oldal és API). Felhasználónév: admin</p>";
     
     // ── HA Section ───────────────────────────────────────
     html += "<h2>&#127968; Home Assistant</h2>";
@@ -663,6 +665,7 @@ static void handleRestart() {
 
 // ─── PINS PAGE ─────────────────────────────────────────────────
 static void handlePins() {
+    if (!web_auth_ok()) return;
     String html;
     html.reserve(6000);
     html = R"rawliteral(<!DOCTYPE html><html lang="hu"><head>
@@ -734,6 +737,7 @@ button:hover{background:#2ea043}
 
 // ─── MODULES PAGE ──────────────────────────────────────────────
 static void handleModules() {
+    if (!web_auth_ok()) return;
     String html;
     html.reserve(8000);  // Largest page, many card loops
     html = R"rawliteral(<!DOCTYPE html><html lang="hu"><head>
@@ -1206,6 +1210,7 @@ static void handleDelRoom() {
 
 // ─── API: scan status (JSON) ────────────────────────────────────
 static void handleApiScan() {
+    if (!web_auth_ok()) return;
     uint16_t total = cfg.mb_scan_end - cfg.mb_scan_start + 1;
     uint16_t current = (scan_addr > cfg.mb_scan_end) ? total : (scan_addr - cfg.mb_scan_start);
     uint8_t pct = total > 0 ? (uint8_t)((current * 100) / total) : 0;
@@ -1287,6 +1292,7 @@ static void handleSaveModList() {
 
 // ─── JSON API Endpoints ─────────────────────────────────────────
 static void handleApiStatus() {
+    if (!web_auth_ok()) return;
     JsonDocument doc;
     doc["hostname"] = cfg.hostname;
     doc["firmware"] = FIRMWARE_VERSION;
@@ -1338,6 +1344,7 @@ static void handleApiStatus() {
 }
 
 static void handleApiConfig() {
+    if (!web_auth_ok()) return;
     JsonDocument doc;
     doc["hostname"] = cfg.hostname;
     doc["wifi_ssid"] = cfg.wifi_ssid;
@@ -1365,6 +1372,7 @@ static void handleApiConfig() {
 }
 
 static void handleApiModules() {
+    if (!web_auth_ok()) return;
     JsonDocument doc;
     JsonArray arr = doc.to<JsonArray>();
     for (uint16_t i = 0; i < module_count; i++) {
@@ -1401,6 +1409,7 @@ static void handleApiModules() {
 // ─── Full Config Export API ──────────────────────────────────
 // GET /api/export — dumps ALL NVRAM config as JSON (for backup)
 static void handleApiLan() {
+    if (!web_auth_ok()) return;
     JsonDocument doc;
     doc["lan_enabled"] = cfg.lan_enabled;
     doc["lan_type"] = cfg.lan_type;

@@ -488,19 +488,27 @@ void eth_web_loop() {
         return;
     }
     String method = req.substring(0, sp1);
-    String path = req.substring(sp1 + 1, sp2);
+    String fullPath = req.substring(sp1 + 1, sp2);
+    // Split path and query string
+    int qi = fullPath.indexOf('?');
+    String path = (qi > 0) ? fullPath.substring(0, qi) : fullPath;
+    String query = (qi > 0) ? fullPath.substring(qi + 1) : "";
     
-    LOG_D("[LAN-WEB] %s %s\n", method.c_str(), path.c_str());
+    LOG_D("[LAN-WEB] %s %s?%s\n", method.c_str(), path.c_str(), query.c_str());
     
     // ── Route ──
+    // All routes require auth when web_auth is enabled
+    // Pass fullPath (path+query) to eth_auth_ok for ?auth=PASSWORD check
     if (path == "/api/status") {
+        if (!eth_auth_ok(client, fullPath)) return;
         eth_handle_api_status(client);
     } else if (path == "/api/lan") {
+        if (!eth_auth_ok(client, fullPath)) return;
         eth_handle_api_lan(client);
     } else if (path.startsWith("/api/")) {
         // ── Extended API: /api/reboot, /api/wifi-reconnect, /api/save-wifi ──
         if (path == "/api/reboot") {
-            if (!eth_auth_ok(client, path)) return;
+            if (!eth_auth_ok(client, fullPath)) return;
             eth_send_text(client, 200, "Rebooting...");
             delay(500);
             ESP.restart();
@@ -510,12 +518,11 @@ void eth_web_loop() {
         } else if (path.startsWith("/api/save-wifi")) {
             // ── Save WiFi+MQTT config via query params (for LAN-only access) ──
             // See /api/save-wifi?ssid=X&wpass=Y&...
-            if (!eth_auth_ok(client, path)) return;
+            if (!eth_auth_ok(client, fullPath)) return;
             Preferences nv;
             nv.begin(NV_NAMESPACE, false);
-            int qi = path.indexOf('?');
-            if (qi > 0) {
-                String qs = path.substring(qi + 1);
+            if (query.length() > 0) {
+                String qs = query;
                 // Simple query string parser: key=value&key=value
                 int pos = 0;
                 while (pos < (int)qs.length()) {
@@ -574,7 +581,7 @@ void eth_web_loop() {
 
         // ── /api/export — Full config export (all NVRAM keys + module names) ──
         } else if (path.startsWith("/api/export")) {
-            if (!eth_auth_ok(client, path)) return;
+            if (!eth_auth_ok(client, fullPath)) return;
             Preferences nv;
             nv.begin(NV_NAMESPACE, true);
 
@@ -783,13 +790,12 @@ void eth_web_loop() {
 
         // ── /api/import — Full config import from JSON query param body ──
         } else if (path.startsWith("/api/import")) {
-            if (!eth_auth_ok(client, path)) return;
+            if (!eth_auth_ok(client, fullPath)) return;
             // Parse query string from URL for import data
-            int qi = path.indexOf('?');
-            if (qi < 0) {
+            if (query.length() == 0) {
                 eth_send_json(client, 400, "{\"error\":\"missing_query_params\"}");
             } else {
-                String qs = path.substring(qi + 1);
+                String qs = query;
                 Preferences nv;
                 nv.begin(NV_NAMESPACE, false);
 
