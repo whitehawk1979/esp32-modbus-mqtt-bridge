@@ -276,6 +276,7 @@ void config_save() {
     nv.putString(NV_KEY_MQTT_USER, portal.arg("muser"));
     nv.putString(NV_KEY_MQTT_PASS, portal.arg("mpass"));
     nv.putString(NV_KEY_MQTT_PREFIX, portal.arg("mpfx"));
+    nv.putBool(NV_KEY_MQTT_TLS, portal.arg("mtls") == "1");
     
     nv.putBool(NV_KEY_HA_DISC, portal.arg("hadisc") == "1");
     
@@ -317,7 +318,7 @@ void config_print() {
     LOG_I("  LAN:   Enabled=%s Type=%s DHCP=%s IP=%s\n", 
         cfg.lan_enabled?"Yes":"No", cfg.lan_type==0?"W5500":cfg.lan_type==1?"LAN8720":"IP101", cfg.lan_dhcp?"Yes":"No", cfg.lan_ip);
     LOG_I("  WiFi:  SSID=%s AP=%s DHCP=%s IP=%s (fallback)\n", cfg.wifi_ssid, cfg.ap_name[0]?cfg.ap_name:"auto", cfg.wifi_dhcp?"Yes":"No", cfg.wifi_ip);
-    LOG_I("  MQTT:  %s:%d prefix=%s\n", cfg.mqtt_host, cfg.mqtt_port, cfg.mqtt_prefix);
+    LOG_I("  MQTT:  %s:%d prefix=%s TLS=%s\n", cfg.mqtt_host, cfg.mqtt_port, cfg.mqtt_prefix, cfg.mqtt_tls ? "ON" : "OFF");
     LOG_I("  HA:    Discovery=%s\n", cfg.ha_discovery?"ON":"OFF");
     LOG_I("  MB:    Baud=%lu Start=%d End=%d Parity=%d Profile=%d Poll=%dms\n", 
         cfg.mb_baud, cfg.mb_scan_start, cfg.mb_scan_end, cfg.mb_parity, cfg.mb_profile, cfg.mb_poll_ms);

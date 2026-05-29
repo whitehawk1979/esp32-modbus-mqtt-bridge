@@ -7,12 +7,15 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include "modbus_mqtt_ha_bridge.h"
 
-static WiFiClient mqtt_wifi;
-static PubSubClient mqtt(mqtt_wifi);
+// TLS: two client instances, selected at mqtt_init() time
+static WiFiClientSecure mqtt_wifi_secure;
+static WiFiClient mqtt_wifi_plain;
+static PubSubClient mqtt;
 static void mqtt_callback(char *topic, byte *payload, unsigned int length);
 
 static String topic_base(uint8_t slave, const String &suffix = "") {
@@ -103,13 +106,22 @@ void mqtt_init() {
         return;
     }
     
+    // Select TLS or plain client
+    if (cfg.mqtt_tls) {
+        mqtt_wifi_secure.setInsecure();  // Skip cert validation (LAN/self-signed broker)
+        mqtt.setClient(mqtt_wifi_secure);
+        LOG_I("[MQTT] TLS enabled (setInsecure — no cert validation)");
+    } else {
+        mqtt.setClient(mqtt_wifi_plain);
+    }
+    
     mqtt.setServer(cfg.mqtt_host, cfg.mqtt_port);
     mqtt.setKeepAlive(MQTT_KEEPALIVE_S);
     mqtt.setSocketTimeout(MQTT_SOCKET_TIMEOUT);
     mqtt.setBufferSize(MQTT_MAX_PACKET);
     mqtt.setCallback(mqtt_callback);
     
-    LOG_I("[MQTT] Connecting to %s:%d...\n", cfg.mqtt_host, cfg.mqtt_port);
+    LOG_I("[MQTT] Connecting to %s:%d (TLS=%s)...\n", cfg.mqtt_host, cfg.mqtt_port, cfg.mqtt_tls ? "ON" : "OFF");
     
     if (mqtt.connect(
         (String(cfg.hostname) + "_bridge").c_str(),

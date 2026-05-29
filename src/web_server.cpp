@@ -312,6 +312,7 @@ h2{color:#f0883e;background:#161b22;padding:8px 12px;border-radius:6px;margin:16
     bool mc = mqtt_is_connected();
     html += "<div class=\"row\"><span class=\"key\">Állapot</span><span class=\"val " + String(mc?"on":"off") + "\">" + String(mc?"CSATLAKOZVA ✅":"NEM CSATLAKOZOTT ❌") + "</span></div>";
     html += "<div class=\"row\"><span class=\"key\">Broker</span><span class=\"val\">" + String(cfg.mqtt_host) + ":" + String(cfg.mqtt_port) + "</span></div>";
+    html += "<div class=\"row\"><span class=\"key\">TLS</span><span class=\"val " + String(cfg.mqtt_tls?"on":"off") + "\">" + String(cfg.mqtt_tls?"BE ✅":"KI ❌") + "</span></div>";
     html += "<div class=\"row\"><span class=\"key\">Prefix</span><span class=\"val\">" + String(cfg.mqtt_prefix) + "</span></div>";
     html += "<div class=\"row\"><span class=\"key\">HA Discovery</span><span class=\"val " + String(cfg.ha_discovery?"on":"off") + "\">" + String(cfg.ha_discovery?"BE ✅":"KI ❌") + "</span></div>";
     html += "</div>";
@@ -502,6 +503,8 @@ button:hover{background:#2ea043}
     html += "<div class=\"row\"><div class=\"fm\"><label>Felhasználó</label><input name=\"muser\" value=\"" + String(cfg.mqtt_user) + "\"></div>";
     html += "<div class=\"fm\"><label>Jelszó</label><input type=\"password\" name=\"mpass\" value=\"" + String(cfg.mqtt_pass) + "\"></div></div>";
     html += "<div class=\"fm\"><label>MQTT Prefix</label><input name=\"mpfx\" value=\"" + String(cfg.mqtt_prefix) + "\"></div>";
+    html += "<div class=\"chk\"><input type=\"checkbox\" id=\"mtls\" name=\"mtls\" value=\"1\" " + String(cfg.mqtt_tls?"checked":"") + "><label for=\"mtls\">TLS (titkosított kapcsolat)</label></div>";
+    html += "<p class=\"note\">TLS: port 8883 ajánlott. LAN broker esetén nem kötelező. A tanúsítvány nincs ellenőrizve (setInsecure).</p>";
     
     // ── Auth Section ─────────────────────────────────────
     html += "<h2>&#128272; Web hitelesítés</h2>";
@@ -1304,6 +1307,7 @@ static void handleApiStatus() {
         doc["lan_ip"] = "0.0.0.0";
     }
     doc["mqtt_connected"] = mqtt_is_connected();
+    doc["mqtt_tls"] = cfg.mqtt_tls;
     doc["modules"] = module_count;
     if (module_count > 0) {
         JsonArray mods = doc["module_list"].to<JsonArray>();
@@ -1343,6 +1347,7 @@ static void handleApiConfig() {
     doc["lan_dhcp"] = cfg.lan_dhcp;
     doc["mqtt_host"] = cfg.mqtt_host;
     doc["mqtt_port"] = cfg.mqtt_port;
+    doc["mqtt_tls"] = cfg.mqtt_tls;
     doc["mqtt_user"] = cfg.mqtt_user;
     doc["mqtt_prefix"] = cfg.mqtt_prefix;
     doc["ha_discovery"] = cfg.ha_discovery;

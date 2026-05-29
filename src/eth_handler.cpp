@@ -408,6 +408,7 @@ static void eth_handle_api_status(EthernetClient& client) {
         "\"ip\":\"%s\",\"wifi_ip\":\"%s\","
         "\"wifi_rssi\":%d,"
         "\"mqtt_connected\":%s,"
+        "\"mqtt_tls\":%s,"
         "\"uptime_s\":%lu,"
         "\"lan_started\":%s,\"lan_connected\":%s,"
         "\"lan_hw\":\"%s\",\"lan_link\":\"%s\","
@@ -421,6 +422,7 @@ static void eth_handle_api_status(EthernetClient& client) {
         WiFi.localIP().toString().c_str(),
         WiFi.RSSI(),
         mqtt_is_connected() ? "true" : "false",
+        cfg.mqtt_tls ? "true" : "false",
         (unsigned long)(millis() / 1000),
         lan_started ? "true" : "false",
         lan_connected ? "true" : "false",
