@@ -268,7 +268,7 @@ h2{color:#f0883e;background:#161b22;padding:8px 12px;border-radius:6px;margin:16
 </style></head><body>)rawliteral";
 
     html += "<h1>&#9889; " + String(cfg.hostname) + "</h1>";
-    html += "<div class=\"nav\"><a class=\"active\" href=\"/\">Státusz</a><a href=\"/config\">Beállítások</a><a href=\"/pins\">Pinek</a><a href=\"/modules\">Modulok</a><a href=\"/ota\">OTA</a><a href=\"/admin\">Admin</a></div>";
+    html += "<div class=\"nav\"><a class=\"active\" href=\"/\">Státusz</a><a href=\"/config\">Beállítások</a><a href=\"/pins\">Pinek</a><a href=\"/modules\">Modulok</a><a href=\"/ota\">OTA</a><a href=\"/admin\">Admin</a><a href=\"/logout\" style=\"float:right\">&#128274; Kilépés</a></div>";
     
     // Network — Dual stack display (both interfaces always visible)
     html += "<h2>&#128279; Hálózat</h2><div class=\"card\">";
@@ -451,7 +451,7 @@ button:hover{background:#2ea043}
 </style>
 </head><body>
 <h1>&#9889; Beállítások</h1>
-<div class="nav"><a href="/">Státusz</a><a class="active" href="/config">Beállítások</a><a href="/pins">Pinek</a><a href="/modules">Modulok</a><a href="/ota">OTA</a><a href="/admin">Admin</a></div>
+<div class="nav"><a href="/">Státusz</a><a class="active" href="/config">Beállítások</a><a href="/pins">Pinek</a><a href="/modules">Modulok</a><a href="/ota">OTA</a><a href="/admin">Admin</a><a href="/logout" style="float:right">&#128274; Kilépés</a></div>
 <div class="pri"><b>&#128279; LAN elsődleges — WiFi automatikus fallback</b><br><span class="note">LAN mindig preferált. Ha leáll, WiFi átveszi. Ha LAN visszajön, automatikusan visszaáll.</span></div>
 <form action="/save" method="POST">)rawliteral";
 
@@ -663,6 +663,22 @@ static void handleRestart() {
     ESP.restart();
 }
 
+// ─── LOGOUT Handler ────────────────────────────────────────────
+// Digest Auth logout: send 401 with stale=true to force browser
+// to discard cached credentials, then redirect to /
+static void handleLogout() {
+    if (!cfg.web_auth) {
+        // Auth disabled — just redirect
+        web.sendHeader("Location", "/");
+        web.send(302);
+        return;
+    }
+    // Force browser to drop Digest credentials by requesting re-auth
+    // with a different stale realm — then redirect
+    web.sendHeader("Location", "/");
+    web.requestAuthentication(DIGEST_AUTH, "ModbusMQTT-Logout");
+}
+
 // ─── PINS PAGE ─────────────────────────────────────────────────
 static void handlePins() {
     if (!web_auth_ok()) return;
@@ -695,7 +711,7 @@ button:hover{background:#2ea043}
 </style>
 </head><body>
 <h1>&#128295; GPIO Pinek</h1>
-<div class="nav"><a href="/">Státusz</a><a href="/config">Beállítások</a><a class="active" href="/pins">Pinek</a><a href="/modules">Modulok</a><a href="/ota">OTA</a><a href="/admin">Admin</a></div>
+<div class="nav"><a href="/">Státusz</a><a href="/config">Beállítások</a><a class="active" href="/pins">Pinek</a><a href="/modules">Modulok</a><a href="/ota">OTA</a><a href="/admin">Admin</a><a href="/logout" style="float:right">&#128274; Kilépés</a></div>
 <p class="note">-1 = nem használt / letiltott. A pinek megváltoztatása után újraindítás szükséges!</p>
 <form action="/savepins" method="POST">)rawliteral";
 
@@ -818,7 +834,7 @@ function toggleRelay(addr,relay,curState){
 </script>
 </head><body>
 <h1>&#128268; Modbus Modulok</h1>
-<div class="nav"><a href="/">Státusz</a><a href="/config">Beállítások</a><a href="/pins">Pinek</a><a class="active" href="/modules">Modulok</a><a href="/ota">OTA</a><a href="/admin">Admin</a></div>)rawliteral";
+<div class="nav"><a href="/">Státusz</a><a href="/config">Beállítások</a><a href="/pins">Pinek</a><a class="active" href="/modules">Modulok</a><a href="/ota">OTA</a><a href="/admin">Admin</a><a href="/logout" style="float:right">&#128274; Kilépés</a></div>)rawliteral";
 
     if (!scan_active) {
         html += "<form action=\"/rescan\" method=\"POST\" style=\"display:inline;margin-bottom:8px\"><button type=\"submit\" style=\"background:#1f6feb\">🔄 Újrascan</button></form>";
@@ -1676,7 +1692,7 @@ input:focus{outline:none;border-color:#58a6ff}
 .foot{text-align:center;color:#484f58;font-size:11px;margin-top:16px;border-top:1px solid #21262d;padding-top:8px}
 </style></head><body>
 <h1>&#128272; Admin</h1>
-<div class="nav"><a href="/">Státusz</a><a href="/config">Beállítások</a><a href="/pins">Pinek</a><a href="/modules">Modulok</a><a href="/ota">OTA</a><a class="active" href="/admin">Admin</a></div>
+<div class="nav"><a href="/">Státusz</a><a href="/config">Beállítások</a><a href="/pins">Pinek</a><a href="/modules">Modulok</a><a href="/ota">OTA</a><a class="active" href="/admin">Admin</a><a href="/logout" style="float:right">&#128274; Kilépés</a></div>
 <div class="pri"><b>&#9888; Figyelem!</b> Itt jelszavakat módosítasz. Ha elfelejted a jelszót, csak USB flash-sel lehet visszaállítani!</div>
 <form action="/saveadmin" method="POST">
 <h2>&#128100; Admin jelszó (Digest Auth)</h2>
@@ -1825,6 +1841,7 @@ void web_server_init() {
     web.on("/relay", HTTP_GET, handleRelay);
     web.on("/rescan", HTTP_POST, handleRescan);
     web.on("/restart", HTTP_GET, handleRestart);
+    web.on("/logout", HTTP_GET, handleLogout);
     web.on("/api/backup", HTTP_GET, handleApiBackup);
     web.on("/api/restore", HTTP_POST, handleApiRestore);
     // Aliases for clarity: /api/export = /api/backup, /api/import = /api/restore

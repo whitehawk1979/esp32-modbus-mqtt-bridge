@@ -58,7 +58,7 @@ button:disabled{background:#484f58;cursor:not-allowed}
 .status-err{background:#0d1117;border:1px solid #f85149;color:#f85149}
 </style></head><body>
 <h1>&#128230; OTA Firmware Frissítés</h1>
-<div class="nav"><a href="/">Státusz</a><a href="/config">Beállítások</a><a href="/pins">Pinek</a><a href="/modules">Modulok</a><a class="active" href="/ota">OTA</a><a href="/admin">Admin</a></div>
+<div class="nav"><a href="/">Státusz</a><a href="/config">Beállítások</a><a href="/pins">Pinek</a><a href="/modules">Modulok</a><a class="active" href="/ota">OTA</a><a href="/admin">Admin</a><a href="/logout" style="float:right">🔒 Kilépés</a></div>
 
 <div class="warn-box"><b>&#9888; Figyelem!</b> A firmware frissítés során az eszköz újraindul. Hibás firmware brickelheti az eszközt! Csak megbízható .bin fájlt tölts fel!</div>
 
