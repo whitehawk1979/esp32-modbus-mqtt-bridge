@@ -355,6 +355,48 @@ void mqtt_cleanup_discovery(Slave_Module *mod)
     LOG_I("[MQTT] Cleaned up discovery for module S%d\n", mod->slave_addr);
 }
 
+// ─── Set common device block for HA Discovery ────────────────────
+// Builds the "device" JSON object with identifiers, name, manufacturer, model, sw, area.
+// Reused across all entities in mqtt_publish_discovery() to avoid repeated string allocs.
+static void set_device_block(JsonDocument &doc, Slave_Module *mod, const String &area)
+{
+    doc["device"]["identifiers"] = String(cfg.hostname) + "_ha_v2_" + String(mod->slave_addr);
+    doc["device"]["name"] = get_device_name(mod);
+    doc["device"]["mf"] = get_manufacturer(mod);
+    doc["device"]["mdl"] = mod->model.model_name;
+    doc["device"]["sw"] = FIRMWARE_VERSION;
+    if (mod->model.serial_number > 0)
+        doc["device"]["sn"] = String(mod->model.serial_number);
+    if (area.length() > 0)
+        doc["device"]["suggested_area"] = area;
+}
+
+// ─── Set common availability block ──────────────────────────────
+static void set_availability(JsonDocument &doc)
+{
+    doc["availability_topic"] = topic_base(0, "status");
+    doc["payload_available"] = "online";
+    doc["payload_not_available"] = "offline";
+}
+
+// ─── Serialize doc and publish to MQTT ──────────────────────────
+// Uses PSRAM buffer when available to reduce heap pressure on large payloads.
+static bool discovery_publish(const char *topic, JsonDocument &doc, bool retain = true)
+{
+    size_t json_size = measureJson(doc) + 1;
+    // Allocate buffer in PSRAM if available, otherwise heap
+    char *buf = reinterpret_cast<char *>(psram_malloc(json_size));
+    if (!buf)
+    {
+        LOG_E("[MQTT] Discovery publish: OOM (%u bytes)\n", json_size);
+        return false;
+    }
+    serializeJson(doc, buf, json_size);
+    bool ok = mqtt.publish(topic, buf, retain);
+    free(buf);
+    return ok;
+}
+
 void mqtt_publish_discovery(Slave_Module *mod)
 {
     if (!cfg.ha_discovery)
@@ -363,9 +405,9 @@ void mqtt_publish_discovery(Slave_Module *mod)
         return;
     }
 
-    JsonDocument doc;
+    JsonDocument doc(PsramAllocator::instance());
 
-    // Common area for all entities of this module
+    // Common area for all entities of this module (computed once)
     String area = config_get_module_area(mod->slave_addr);
 
     // Relay Switches
@@ -387,21 +429,10 @@ void mqtt_publish_discovery(Slave_Module *mod)
         doc["state_off"] = "OFF";
         doc["qos"] = MQTT_QOS;
         doc["retain"] = MQTT_RETAIN_STATE;
-        doc["availability_topic"] = topic_base(0, "status");
-        doc["payload_available"] = "online";
-        doc["payload_not_available"] = "offline";
-        doc["device"]["identifiers"] = String(cfg.hostname) + "_ha_v2_" + String(mod->slave_addr);
-        doc["device"]["name"] = get_device_name(mod);
-        doc["device"]["mf"] = get_manufacturer(mod);
-        doc["device"]["mdl"] = mod->model.model_name;
-        doc["device"]["sw"] = "Modbus-MQTT Bridge v2.0";
-        doc["device"]["sn"] = String(mod->model.serial_number);
-        if (area.length() > 0)
-            doc["device"]["suggested_area"] = area;
+        set_availability(doc);
+        set_device_block(doc, mod, area);
 
-        String payload;
-        serializeJson(doc, payload);
-        mqtt.publish(discovery_topic("switch", uid).c_str(), payload.c_str(), true);
+        discovery_publish(discovery_topic("switch", uid).c_str(), doc);
     }
 
     // DI Binary Sensors (state ON/OFF)
@@ -422,20 +453,10 @@ void mqtt_publish_discovery(Slave_Module *mod)
         doc["device_class"] = "opening";
         doc["entity_category"] = "diagnostic";
         doc["icon"] = "mdi:light-switch";
-        doc["availability_topic"] = topic_base(0, "status");
-        doc["payload_available"] = "online";
-        doc["payload_not_available"] = "offline";
-        doc["device"]["identifiers"] = String(cfg.hostname) + "_ha_v2_" + String(mod->slave_addr);
-        doc["device"]["name"] = get_device_name(mod);
-        doc["device"]["mf"] = get_manufacturer(mod);
-        doc["device"]["mdl"] = mod->model.model_name;
-        doc["device"]["sw"] = "Modbus-MQTT Bridge v2.0";
-        if (area.length() > 0)
-            doc["device"]["suggested_area"] = area;
+        set_availability(doc);
+        set_device_block(doc, mod, area);
 
-        String payload;
-        serializeJson(doc, payload);
-        mqtt.publish(discovery_topic("binary_sensor", uid).c_str(), payload.c_str(), true);
+        discovery_publish(discovery_topic("binary_sensor", uid).c_str(), doc);
     }
 
     // DI Click Event Sensors (for automation triggers)
@@ -455,20 +476,10 @@ void mqtt_publish_discovery(Slave_Module *mod)
         doc["state_topic"] = topic_base(mod->slave_addr, "di/" + String(d) + "/click");
         doc["icon"] = "mdi:gesture-tap";
         doc["entity_category"] = "diagnostic";
-        doc["availability_topic"] = topic_base(0, "status");
-        doc["payload_available"] = "online";
-        doc["payload_not_available"] = "offline";
-        doc["device"]["identifiers"] = String(cfg.hostname) + "_ha_v2_" + String(mod->slave_addr);
-        doc["device"]["name"] = get_device_name(mod);
-        doc["device"]["mf"] = get_manufacturer(mod);
-        doc["device"]["mdl"] = mod->model.model_name;
-        doc["device"]["sw"] = "Modbus-MQTT Bridge v2.0";
-        if (area.length() > 0)
-            doc["device"]["suggested_area"] = area;
+        set_availability(doc);
+        set_device_block(doc, mod, area);
 
-        String payload;
-        serializeJson(doc, payload);
-        mqtt.publish(discovery_topic("sensor", click_uid).c_str(), payload.c_str(), true);
+        discovery_publish(discovery_topic("sensor", click_uid).c_str(), doc);
     }
 
     // Module Status Binary Sensor
@@ -481,14 +492,9 @@ void mqtt_publish_discovery(Slave_Module *mod)
     doc["state_topic"] = topic_base(mod->slave_addr, "status");
     doc["payload_on"] = "online";
     doc["payload_off"] = "offline";
-    doc["device"]["identifiers"] = String(cfg.hostname) + "_ha_v2_" + String(mod->slave_addr);
-    doc["device"]["name"] = get_device_name(mod);
-    if (area.length() > 0)
-        doc["device"]["suggested_area"] = area;
+    set_device_block(doc, mod, area);
 
-    String payload;
-    serializeJson(doc, payload);
-    mqtt.publish(discovery_topic("binary_sensor", uid_avail).c_str(), payload.c_str(), true);
+    discovery_publish(discovery_topic("binary_sensor", uid_avail).c_str(), doc);
 
     // Slave Address Sensor
     doc.clear();
@@ -500,20 +506,10 @@ void mqtt_publish_discovery(Slave_Module *mod)
     doc["state_topic"] = topic_base(mod->slave_addr, "address");
     doc["icon"] = "mdi:identifier";
     doc["entity_category"] = "diagnostic";
-    doc["availability_topic"] = topic_base(0, "status");
-    doc["payload_available"] = "online";
-    doc["payload_not_available"] = "offline";
-    doc["device"]["identifiers"] = String(cfg.hostname) + "_ha_v2_" + String(mod->slave_addr);
-    doc["device"]["name"] = get_device_name(mod);
-    doc["device"]["mf"] = get_manufacturer(mod);
-    doc["device"]["mdl"] = mod->model.model_name;
-    doc["device"]["sw"] = "Modbus-MQTT Bridge v2.0";
-    if (area.length() > 0)
-        doc["device"]["suggested_area"] = area;
+    set_availability(doc);
+    set_device_block(doc, mod, area);
 
-    payload.clear();
-    serializeJson(doc, payload);
-    mqtt.publish(discovery_topic("sensor", uid_addr).c_str(), payload.c_str(), true);
+    discovery_publish(discovery_topic("sensor", uid_addr).c_str(), doc);
 
     // Publish slave address value
     mqtt.publish(topic_base(mod->slave_addr, "address").c_str(), String(mod->slave_addr).c_str(), true);

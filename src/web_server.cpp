@@ -1735,6 +1735,8 @@ static void handleApiStatus()
     doc["uptime_s"] = millis() / 1000;
     doc["heap_free"] = ESP.getFreeHeap();
     doc["heap_free_kb"] = ESP.getFreeHeap() / 1024;
+    doc["psram_free"] = psram_free();
+    doc["psram_total"] = psram_total();
     doc["wdt_reboots"] = wdt_get_reboots();
     doc["interface"] = cfg.active_if == NET_IF_LAN ? "LAN" : cfg.active_if == NET_IF_WIFI ? "WiFi" : "NONE";
     doc["ip"] = active_ip;
@@ -1818,7 +1820,7 @@ static void handleApiModules()
 {
     if (!web_auth_ok())
         return;
-    JsonDocument doc;
+    JsonDocument doc(PsramAllocator::instance());
     JsonArray arr = doc.to<JsonArray>();
     for (uint16_t i = 0; i < module_count; i++)
     {
@@ -1967,7 +1969,7 @@ static void handleApiBackup()
 {
     if (!web_auth_ok())
         return;
-    JsonDocument doc;
+    JsonDocument doc(PsramAllocator::instance());
     Preferences nv;
     nv.begin(NV_NAMESPACE, true);
 

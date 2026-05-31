@@ -12,6 +12,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <esp_heap_caps.h>
 
 // ─── Logging Macros ──────────────────────────────────────────
 // LOG_E = always (errors, warnings)
@@ -98,7 +99,7 @@
 #define MQTT_RECONNECT_MS 5000
 
 // ─── Firmware Version ────────────────────────────────────────
-#define FIRMWARE_VERSION "2.4.0" // Major.Minor.Patch
+#define FIRMWARE_VERSION "2.5.0" // Major.Minor.Patch
 
 // ─── TCP Modbus Bridge ─────────────────────────────────────────
 #define TCP_PORT 502
@@ -485,5 +486,50 @@ uint8_t ws_client_count_get();
 // main.cpp
 void setup();
 void loop();
+
+// ─── PSRAM Helpers ──────────────────────────────────────────────
+// ESP32-S3 has 8MB OPI PSRAM — use for large buffers (discovery JSON, WS payloads)
+inline size_t psram_free() { return heap_caps_get_free_size(MALLOC_CAP_SPIRAM); }
+inline size_t psram_total() { return heap_caps_get_total_size(MALLOC_CAP_SPIRAM); }
+inline bool psram_available() { return psram_total() > 0; }
+// Allocate in PSRAM if available, fall back to regular heap
+inline void *psram_malloc(size_t size)
+{
+    if (psram_available())
+        return heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
+    return malloc(size);
+}
+
+// ─── PSRAM Allocator for ArduinoJson ────────────────────────────
+// Implements ArduinoJson::Allocator interface — allocate from PSRAM first,
+// fall back to regular heap. Use for large JsonDocument instances (discovery,
+// heartbeat, backup, modules API).
+class PsramAllocator : public ArduinoJson::Allocator {
+ public:
+  void* allocate(size_t size) override {
+    if (psram_available())
+      return heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
+    return malloc(size);
+  }
+
+  void deallocate(void* ptr) override {
+    heap_caps_free(ptr);
+  }
+
+  void* reallocate(void* ptr, size_t new_size) override {
+    if (psram_available())
+      return heap_caps_realloc(ptr, new_size, MALLOC_CAP_SPIRAM);
+    return realloc(ptr, new_size);
+  }
+
+  static Allocator* instance() {
+    static PsramAllocator allocator;
+    return &allocator;
+  }
+
+ private:
+  PsramAllocator() = default;
+  ~PsramAllocator() = default;
+};
 
 #endif

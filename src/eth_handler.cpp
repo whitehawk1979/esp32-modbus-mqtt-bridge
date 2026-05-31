@@ -486,6 +486,7 @@ static void eth_handle_api_status(EthernetClient &client)
                   "\"modbus\":{\"poll_ms\":%u,\"errors\":%lu},"
                   "\"tcp_bridge\":%s,"
                   "\"free_heap\":%lu,"
+                  "\"psram_free\":%lu,\"psram_total\":%lu,"
                   "\"lan_type\":%d}\n",
                   FIRMWARE_VERSION,
                   cfg.hostname,
@@ -505,6 +506,8 @@ static void eth_handle_api_status(EthernetClient &client)
                   (unsigned long)0,
                   cfg.tcp_enabled ? "true" : "false",
                   (unsigned long)ESP.getFreeHeap(),
+                  (unsigned long)psram_free(),
+                  (unsigned long)psram_total(),
                   cfg.lan_type);
     client.stop();
 }

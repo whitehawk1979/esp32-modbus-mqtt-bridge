@@ -56,7 +56,7 @@ static String ws_di_json(Slave_Module *mod, uint8_t d, bool state)
 
 static String ws_heartbeat_json()
 {
-    JsonDocument doc;
+    JsonDocument doc(PsramAllocator::instance());
     doc["type"] = "heartbeat";
     doc["uptime"] = millis() / 1000;
     doc["heap_kb"] = ESP.getFreeHeap() / 1024;
