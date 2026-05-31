@@ -765,6 +765,20 @@ void loop()
     mqtt_loop();
     tcp_loop();
 
+    // ── Deferred discovery: publish if modules exist but not yet discovered ──
+    if (scanning_done && mqtt_is_connected() && cfg.ha_discovery && module_count > 0)
+    {
+        for (uint16_t i = 0; i < module_count; i++)
+        {
+            if (!modules[i].discovered)
+            {
+                mqtt_publish_discovery(&modules[i]);
+                mqtt_subscribe_commands(&modules[i]);
+                modules[i].discovered = true;
+            }
+        }
+    }
+
     // ── Modbus scan (rescan triggered from web UI) ──────────
     // Scan multiple addresses per loop iteration for faster bus scanning
     if (scan_active)

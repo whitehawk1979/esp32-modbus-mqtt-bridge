@@ -222,7 +222,7 @@ struct HA_Model
     uint8_t model_id;
     uint16_t firmware_ver;
     uint32_t serial_number;
-    char model_name[16];
+    char model_name[24];
     // Waveshare ESP32-S3-ETH V1.0: always 6 DI + 6 Relay (fixed, not read from registers)
     static constexpr uint8_t DI_COUNT = HA_V2_DI_COUNT;
     static constexpr uint8_t RELAY_COUNT = HA_V2_RELAY_COUNT;
@@ -522,7 +522,7 @@ class PsramAllocator : public ArduinoJson::Allocator {
     return realloc(ptr, new_size);
   }
 
-  static Allocator* instance() {
+  static PsramAllocator* instance() {
     static PsramAllocator allocator;
     return &allocator;
   }

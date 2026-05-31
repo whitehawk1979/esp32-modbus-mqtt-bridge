@@ -32,7 +32,7 @@ static void cfg_defaults()
     // ── LAN: W5500 enabled ──
     cfg.lan_enabled = true;
     cfg.lan_dhcp = true;
-    cfg.lan_type = 1; // W5500
+    cfg.lan_type = 0; // W5500 SPI
     cfg.active_if = NET_IF_NONE;
     // ── MQTT ──
     strlcpy(cfg.mqtt_host, "192.168.1.43", sizeof(cfg.mqtt_host));
@@ -52,7 +52,7 @@ static void cfg_defaults()
     cfg.mb_reg_coil_start = 0;
     cfg.mb_reg_di_start = 1;
     cfg.mb_poll_ms = 500;
-    cfg.virtual_module = false;
+    cfg.virtual_module = true;
     // ── TCP bridge ──
     cfg.tcp_enabled = true;
     cfg.tcp_port = 502;
@@ -63,10 +63,10 @@ static void cfg_defaults()
     cfg.pin_status_led = 2;
     cfg.pin_config_btn = 0;
     cfg.pin_eth_mosi = 11;
-    cfg.pin_eth_miso = 13;
-    cfg.pin_eth_sclk = 12;
-    cfg.pin_eth_cs = 10;
-    cfg.pin_eth_int = 14;
+    cfg.pin_eth_miso = 12;
+    cfg.pin_eth_sclk = 13;
+    cfg.pin_eth_cs = 14;
+    cfg.pin_eth_int = 10;
     cfg.pin_eth_rst = 9;
     // ── Hostname + Auth ──
     strlcpy(cfg.hostname, "modbusmqtt", sizeof(cfg.hostname));
@@ -132,9 +132,9 @@ static void factory_provision(Preferences &nv)
     }
     if (!nv.isKey(NV_KEY_ETH_TYPE))
     {
-        nv.putUChar(NV_KEY_ETH_TYPE, 1);
+        nv.putUChar(NV_KEY_ETH_TYPE, 0);
         dirty = true;
-    } // W5500
+    } // W5500 SPI = 0
 
     // ── MQTT ──
     nv.getString(NV_KEY_MQTT_HOST, buf, sizeof(buf));
@@ -222,7 +222,7 @@ static void factory_provision(Preferences &nv)
     }
     if (!nv.isKey(NV_KEY_VIRTUAL_MOD))
     {
-        nv.putBool(NV_KEY_VIRTUAL_MOD, false);
+        nv.putBool(NV_KEY_VIRTUAL_MOD, true);
         dirty = true;
     }
 
@@ -350,22 +350,22 @@ static void factory_provision(Preferences &nv)
     }
     if (!nv.isKey(NV_KEY_PIN_ETH_MISO))
     {
-        nv.putInt(NV_KEY_PIN_ETH_MISO, 13);
+        nv.putInt(NV_KEY_PIN_ETH_MISO, 12);
         dirty = true;
     }
     if (!nv.isKey(NV_KEY_PIN_ETH_SCLK))
     {
-        nv.putInt(NV_KEY_PIN_ETH_SCLK, 12);
+        nv.putInt(NV_KEY_PIN_ETH_SCLK, 13);
         dirty = true;
     }
     if (!nv.isKey(NV_KEY_PIN_ETH_CS))
     {
-        nv.putInt(NV_KEY_PIN_ETH_CS, 10);
+        nv.putInt(NV_KEY_PIN_ETH_CS, 14);
         dirty = true;
     }
     if (!nv.isKey(NV_KEY_PIN_ETH_INT))
     {
-        nv.putInt(NV_KEY_PIN_ETH_INT, 14);
+        nv.putInt(NV_KEY_PIN_ETH_INT, 10);
         dirty = true;
     }
     if (!nv.isKey(NV_KEY_PIN_ETH_RST))
@@ -406,7 +406,7 @@ void config_load()
     nv.getString(NV_KEY_ETH_GW, cfg.lan_gw, sizeof(cfg.lan_gw));
     nv.getString(NV_KEY_ETH_MASK, cfg.lan_mask, sizeof(cfg.lan_mask));
     nv.getString(NV_KEY_ETH_DNS, cfg.lan_dns, sizeof(cfg.lan_dns));
-    cfg.lan_type = nv.getUChar(NV_KEY_ETH_TYPE, 1); // default W5500
+    cfg.lan_type = nv.getUChar(NV_KEY_ETH_TYPE, 0); // default W5500=0
 
     nv.getString(NV_KEY_MQTT_HOST, cfg.mqtt_host, sizeof(cfg.mqtt_host));
     cfg.mqtt_port = nv.getUShort(NV_KEY_MQTT_PORT, 1883);
@@ -425,7 +425,7 @@ void config_load()
     cfg.mb_reg_coil_start = nv.getUShort(NV_KEY_MB_REG_COIL, 0);
     cfg.mb_reg_di_start = nv.getUShort(NV_KEY_MB_REG_DI, 1);
     cfg.mb_poll_ms = nv.getUShort(NV_KEY_MB_POLL_MS, 500);
-    cfg.virtual_module = nv.getBool(NV_KEY_VIRTUAL_MOD, false);
+    cfg.virtual_module = nv.getBool(NV_KEY_VIRTUAL_MOD, true);
 
     cfg.tcp_enabled = nv.getBool(NV_KEY_TCP_EN, true);
     cfg.tcp_port = nv.getUShort(NV_KEY_TCP_PORT, 502);
@@ -436,10 +436,10 @@ void config_load()
     cfg.pin_status_led = (int8_t)nv.getInt(NV_KEY_PIN_LED, 2);
     cfg.pin_config_btn = (int8_t)nv.getInt(NV_KEY_PIN_BTN, 0);
     cfg.pin_eth_mosi = (int8_t)nv.getInt(NV_KEY_PIN_ETH_MOSI, 11);
-    cfg.pin_eth_miso = (int8_t)nv.getInt(NV_KEY_PIN_ETH_MISO, 13);
-    cfg.pin_eth_sclk = (int8_t)nv.getInt(NV_KEY_PIN_ETH_SCLK, 12);
-    cfg.pin_eth_cs = (int8_t)nv.getInt(NV_KEY_PIN_ETH_CS, 10);
-    cfg.pin_eth_int = (int8_t)nv.getInt(NV_KEY_PIN_ETH_INT, 14);
+    cfg.pin_eth_miso = (int8_t)nv.getInt(NV_KEY_PIN_ETH_MISO, 12);
+    cfg.pin_eth_sclk = (int8_t)nv.getInt(NV_KEY_PIN_ETH_SCLK, 13);
+    cfg.pin_eth_cs = (int8_t)nv.getInt(NV_KEY_PIN_ETH_CS, 14);
+    cfg.pin_eth_int = (int8_t)nv.getInt(NV_KEY_PIN_ETH_INT, 10);
     cfg.pin_eth_rst = (int8_t)nv.getInt(NV_KEY_PIN_ETH_RST, 9);
     nv.getString(NV_KEY_HOSTNAME, cfg.hostname, sizeof(cfg.hostname));
 

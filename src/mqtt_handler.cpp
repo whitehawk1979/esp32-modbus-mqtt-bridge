@@ -22,9 +22,9 @@ static String topic_base(uint8_t slave, const String &suffix = "")
 {
     String t = String(cfg.mqtt_prefix) + "/ha_v2/";
     if (slave > 0)
-        t += String(slave);
+        t += String(slave) + "/";
     if (suffix.length() > 0)
-        t += "/" + suffix;
+        t += suffix;
     return t;
 }
 
@@ -417,7 +417,7 @@ void mqtt_publish_discovery(Slave_Module *mod)
         String uid = unique_id(mod->slave_addr, "relay", r);
         String obj_id = String(cfg.hostname) + "_s" + String(mod->slave_addr) + "_r" + String(r);
 
-        doc["platform"] = "mqtt";
+        // Note: do NOT set doc["platform"] = "mqtt" — HA auto-detects platform from topic path
         doc["name"] = get_relay_entity_name(mod, r);
         doc["unique_id"] = uid;
         doc["object_id"] = obj_id;
@@ -442,7 +442,7 @@ void mqtt_publish_discovery(Slave_Module *mod)
         String uid = unique_id(mod->slave_addr, "di", d);
         String obj_id = String(cfg.hostname) + "_s" + String(mod->slave_addr) + "_di" + String(d);
 
-        doc["platform"] = "mqtt";
+        // Note: do NOT set doc["platform"] = "mqtt" — HA auto-detects platform from topic path
         doc["name"] = get_di_entity_name(mod, d);
         doc["unique_id"] = uid;
         doc["object_id"] = obj_id;
@@ -469,7 +469,7 @@ void mqtt_publish_discovery(Slave_Module *mod)
         String click_name = (di_custom.length() > 0) ? di_custom + " Kattintás"
                                                      : get_entity_name(mod, "DI " + String(d + 1) + " Kattintás");
 
-        doc["platform"] = "mqtt";
+        // Note: do NOT set doc["platform"] = "mqtt" — HA auto-detects platform from topic path
         doc["name"] = click_name;
         doc["unique_id"] = click_uid;
         doc["object_id"] = String(cfg.hostname) + "_s" + String(mod->slave_addr) + "_di" + String(d) + "_click";
@@ -485,7 +485,7 @@ void mqtt_publish_discovery(Slave_Module *mod)
     // Module Status Binary Sensor
     doc.clear();
     String uid_avail = unique_id(mod->slave_addr, "avail", 0);
-    doc["platform"] = "mqtt";
+    // Note: do NOT set doc["platform"] = "mqtt" — HA auto-detects platform from topic path
     doc["name"] = get_entity_name(mod, "Státusz");
     doc["unique_id"] = uid_avail;
     doc["entity_category"] = "diagnostic";
@@ -499,7 +499,7 @@ void mqtt_publish_discovery(Slave_Module *mod)
     // Slave Address Sensor
     doc.clear();
     String uid_addr = unique_id(mod->slave_addr, "addr", 0);
-    doc["platform"] = "mqtt";
+    // Note: do NOT set doc["platform"] = "mqtt" — HA auto-detects platform from topic path
     doc["name"] = get_entity_name(mod, "Slave Cím");
     doc["unique_id"] = uid_addr;
     doc["object_id"] = String(cfg.hostname) + "_s" + String(mod->slave_addr) + "_addr";
@@ -691,7 +691,7 @@ void mqtt_publish_bridge_discovery()
     {
         doc.clear();
         String uid = bridge_id + "_rssi";
-        doc["platform"] = "mqtt";
+        // Note: do NOT set doc["platform"] = "mqtt" — HA auto-detects platform from topic path
         doc["name"] = "WiFi Jel";
         doc["unique_id"] = uid;
         doc["object_id"] = uid;
@@ -712,7 +712,7 @@ void mqtt_publish_bridge_discovery()
     {
         doc.clear();
         String uid = bridge_id + "_heap";
-        doc["platform"] = "mqtt";
+        // Note: do NOT set doc["platform"] = "mqtt" — HA auto-detects platform from topic path
         doc["name"] = "Szabad Memória";
         doc["unique_id"] = uid;
         doc["object_id"] = uid;
@@ -732,7 +732,7 @@ void mqtt_publish_bridge_discovery()
     {
         doc.clear();
         String uid = bridge_id + "_uptime";
-        doc["platform"] = "mqtt";
+        // Note: do NOT set doc["platform"] = "mqtt" — HA auto-detects platform from topic path
         doc["name"] = "Uptime";
         doc["unique_id"] = uid;
         doc["object_id"] = uid;
@@ -752,7 +752,7 @@ void mqtt_publish_bridge_discovery()
     {
         doc.clear();
         String uid = bridge_id + "_if";
-        doc["platform"] = "mqtt";
+        // Note: do NOT set doc["platform"] = "mqtt" — HA auto-detects platform from topic path
         doc["name"] = "Hálózat";
         doc["unique_id"] = uid;
         doc["object_id"] = uid;
@@ -771,7 +771,7 @@ void mqtt_publish_bridge_discovery()
     {
         doc.clear();
         String uid = bridge_id + "_ip";
-        doc["platform"] = "mqtt";
+        // Note: do NOT set doc["platform"] = "mqtt" — HA auto-detects platform from topic path
         doc["name"] = "IP Cím";
         doc["unique_id"] = uid;
         doc["object_id"] = uid;
