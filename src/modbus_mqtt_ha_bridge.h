@@ -403,6 +403,7 @@ void click_set_callback(ClickCallback cb);
 void mqtt_init();
 void mqtt_loop();
 bool mqtt_is_connected();
+bool mqtt_is_on_lan();
 void mqtt_force_disconnect();
 void mqtt_cleanup_discovery(Slave_Module *mod);
 void mqtt_publish_discovery(Slave_Module *mod);

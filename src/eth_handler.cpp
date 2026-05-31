@@ -63,7 +63,7 @@ static volatile bool w5500_task_ok = false;   // true if DHCP/Static succeeded
 #define HAS_W5500
 
 static byte eth_mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
-static EthernetClient eth_tcp_client;
+EthernetClient eth_tcp_client;
 
 // EthernetServer subclass to satisfy ESP32 Arduino core's pure virtual begin(uint16_t)
 class EthServer : public EthernetServer {
@@ -478,6 +478,7 @@ static void eth_handle_api_status(EthernetClient &client)
                   "\"ip\":\"%s\",\"wifi_ip\":\"%s\","
                   "\"wifi_rssi\":%d,"
                   "\"mqtt_connected\":%s,"
+                  "\"mqtt_transport\":\"%s\","
                   "\"mqtt_tls\":%s,"
                   "\"uptime_s\":%lu,"
                   "\"lan_started\":%s,\"lan_connected\":%s,"
@@ -494,6 +495,7 @@ static void eth_handle_api_status(EthernetClient &client)
                   WiFi.localIP().toString().c_str(),
                   WiFi.RSSI(),
                   mqtt_is_connected() ? "true" : "false",
+                  mqtt_is_on_lan() ? "LAN" : "WiFi",
                   cfg.mqtt_tls ? "true" : "false",
                   (unsigned long)(millis() / 1000),
                   lan_started ? "true" : "false",

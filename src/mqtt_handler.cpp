@@ -12,11 +12,20 @@
 #include <ArduinoJson.h>
 #include "modbus_mqtt_ha_bridge.h"
 
-// TLS: two client instances, selected at mqtt_init() time
+#ifdef USE_W5500
+#include <Ethernet.h>
+extern EthernetClient eth_tcp_client; // defined in eth_handler.cpp
+#endif
+
+// Client instances for different transport options
 static WiFiClientSecure mqtt_wifi_secure;
 static WiFiClient mqtt_wifi_plain;
 static PubSubClient mqtt;
 static void mqtt_callback(char *topic, byte *payload, unsigned int length);
+
+// Track which transport MQTT is using (for logging + reconnect switching)
+static bool mqtt_on_lan = false;
+bool mqtt_is_on_lan() { return mqtt_on_lan; }
 
 static String topic_base(uint8_t slave, const String &suffix = "")
 {
@@ -134,16 +143,28 @@ void mqtt_init()
         return;
     }
 
-    // Select TLS or plain client
+    // Select transport: LAN preferred (lower latency, no WDT issues), WiFi fallback
+    // TLS only works over WiFi (EthernetClient has no TLS support)
     if (cfg.mqtt_tls)
     {
         mqtt_wifi_secure.setInsecure(); // Skip cert validation (LAN/self-signed broker)
         mqtt.setClient(mqtt_wifi_secure);
-        LOG_I("[MQTT] TLS enabled (setInsecure — no cert validation)");
+        mqtt_on_lan = false;
+        LOG_I("[MQTT] Transport: WiFi (TLS enabled)");
     }
+#ifdef USE_W5500
+    else if (cfg.lan_enabled && eth_is_connected())
+    {
+        mqtt.setClient(eth_tcp_client);
+        mqtt_on_lan = true;
+        LOG_I("[MQTT] Transport: LAN/Ethernet (W5500)");
+    }
+#endif
     else
     {
         mqtt.setClient(mqtt_wifi_plain);
+        mqtt_on_lan = false;
+        LOG_I("[MQTT] Transport: WiFi (plain)");
     }
 
     mqtt.setServer(cfg.mqtt_host, cfg.mqtt_port);
@@ -191,6 +212,29 @@ void mqtt_loop()
             backoff = 30000;
         if (millis() - last_reconnect > backoff)
         {
+            // Re-evaluate transport on each reconnect attempt
+            bool want_lan = false;
+#ifdef USE_W5500
+            want_lan = !cfg.mqtt_tls && cfg.lan_enabled && eth_is_connected();
+#endif
+            if (want_lan != mqtt_on_lan)
+            {
+                if (want_lan)
+                {
+#ifdef USE_W5500
+                    mqtt.setClient(eth_tcp_client);
+#endif
+                    mqtt_on_lan = true;
+                    LOG_ILN("[MQTT] Switching to LAN/Ethernet transport");
+                }
+                else
+                {
+                    mqtt.setClient(cfg.mqtt_tls ? (Client &)mqtt_wifi_secure : (Client &)mqtt_wifi_plain);
+                    mqtt_on_lan = false;
+                    LOG_ILN("[MQTT] Switching to WiFi transport");
+                }
+            }
+
             if (mqtt.connect((String(cfg.hostname) + "_bridge").c_str(),
                              cfg.mqtt_user[0] ? cfg.mqtt_user : NULL,
                              cfg.mqtt_pass[0] ? cfg.mqtt_pass : NULL,

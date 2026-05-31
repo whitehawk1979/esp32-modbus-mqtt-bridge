@@ -1831,6 +1831,7 @@ static void handleApiStatus()
         doc["lan_ip"] = "0.0.0.0";
     }
     doc["mqtt_connected"] = mqtt_is_connected();
+    doc["mqtt_transport"] = mqtt_is_on_lan() ? "LAN" : "WiFi";
     doc["mqtt_tls"] = cfg.mqtt_tls;
     doc["modules"] = module_count;
     if (module_count > 0)
