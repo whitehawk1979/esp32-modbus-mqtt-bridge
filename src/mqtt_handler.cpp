@@ -165,6 +165,10 @@ void mqtt_init()
         LOG_ILN("[MQTT] Connected");
         // Birth message — ensures HA sees device online even if LWT missed
         mqtt.publish(topic_base(0, "status").c_str(), "online", true);
+        // Ensure HA MQTT integration processes discovery topics
+        // (HA won't process retained config topics without this)
+        if (cfg.ha_discovery)
+            mqtt.publish("homeassistant/status", "online", true);
         // Publish bridge system device discovery
         mqtt_publish_bridge_discovery();
     }
@@ -199,6 +203,9 @@ void mqtt_loop()
                 reconnect_attempts = 0; // Reset backoff on success
                 // Birth message on reconnect
                 mqtt.publish(topic_base(0, "status").c_str(), "online", true);
+                // Ensure HA MQTT integration processes discovery topics
+                if (cfg.ha_discovery)
+                    mqtt.publish("homeassistant/status", "online", true);
                 // Publish bridge system device discovery
                 mqtt_publish_bridge_discovery();
                 for (uint16_t i = 0; i < module_count; i++)

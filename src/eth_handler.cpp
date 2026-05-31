@@ -1311,6 +1311,180 @@ void eth_web_loop()
                 ESP.restart();
             }
         }
+        else if (path == "/api/relay")
+        {
+            // ── Relay toggle (same logic as WiFi handleRelay) ──
+            if (!eth_auth_ok(client, fullPath))
+                return;
+            // Parse query: addr=X&relay=Y&state=Z
+            String q = query.length() > 0 ? query : fullPath.substring(fullPath.indexOf('?') + 1);
+            int a_pos = q.indexOf("addr="), r_pos = q.indexOf("relay="), s_pos = q.indexOf("state=");
+            if (a_pos < 0 || r_pos < 0 || s_pos < 0)
+            {
+                eth_send_json(client, 400, "{\"ok\":false,\"error\":\"missing params\"}");
+                return;
+            }
+            uint8_t addr = (uint8_t)q.substring(a_pos + 5).toInt();
+            uint8_t relay = (uint8_t)q.substring(r_pos + 6).toInt();
+            bool state = q.substring(s_pos + 6).toInt() != 0;
+
+            Slave_Module *mod = nullptr;
+            for (uint16_t i = 0; i < module_count; i++)
+            {
+                if (modules[i].slave_addr == addr)
+                {
+                    mod = &modules[i];
+                    break;
+                }
+            }
+            if (!mod)
+            {
+                eth_send_json(client, 404, "{\"ok\":false,\"error\":\"module not found\"}");
+                return;
+            }
+
+            bool ok;
+            if (mod->is_virtual)
+            {
+                mod->relays[relay].state = state;
+                mod->relays[relay].published = true;
+                mqtt_publish_relay_state(mod, relay);
+                LOG_I("[LAN-WEB] Virtual S%d R%d → %s\n", addr, relay + 1, state ? "ON" : "OFF");
+                ok = true;
+            }
+            else if (!mod->online)
+            {
+                eth_send_json(client, 409, "{\"ok\":false,\"error\":\"module offline\"}");
+                return;
+            }
+            else
+            {
+                ok = modbus_write_coil(addr, relay, state);
+                if (ok)
+                {
+                    mqtt_publish_relay_state(mod, relay);
+                    LOG_I("[LAN-WEB] S%d R%d → %s (Modbus OK)\n", addr, relay + 1, state ? "ON" : "OFF");
+                }
+                else
+                {
+                    LOG_E("[LAN-WEB] S%d R%d write FAILED\n", addr, relay + 1);
+                }
+            }
+
+            if (ok)
+            {
+                char resp[64];
+                snprintf(resp, sizeof(resp), "{\"ok\":true,\"addr\":%u,\"relay\":%u,\"state\":%u}", addr, relay, state ? 1 : 0);
+                eth_send_json(client, 200, resp);
+            }
+            else
+            {
+                eth_send_json(client, 500, "{\"ok\":false,\"error\":\"modbus write failed\"}");
+            }
+        }
+        else if (path == "/api/di")
+        {
+            // ── DI toggle (virtual module only) ──
+            if (!eth_auth_ok(client, fullPath))
+                return;
+            String q = query.length() > 0 ? query : fullPath.substring(fullPath.indexOf('?') + 1);
+            int a_pos = q.indexOf("addr="), d_pos = q.indexOf("di="), s_pos = q.indexOf("state=");
+            if (a_pos < 0 || d_pos < 0 || s_pos < 0)
+            {
+                eth_send_json(client, 400, "{\"ok\":false,\"error\":\"missing params\"}");
+                return;
+            }
+            uint8_t addr = (uint8_t)q.substring(a_pos + 5).toInt();
+            uint8_t di = (uint8_t)q.substring(d_pos + 3).toInt();
+            bool state = q.substring(s_pos + 6).toInt() != 0;
+
+            Slave_Module *mod = nullptr;
+            for (uint16_t i = 0; i < module_count; i++)
+            {
+                if (modules[i].slave_addr == addr)
+                {
+                    mod = &modules[i];
+                    break;
+                }
+            }
+            if (!mod)
+            {
+                eth_send_json(client, 404, "{\"ok\":false,\"error\":\"module not found\"}");
+                return;
+            }
+            if (!mod->is_virtual)
+            {
+                eth_send_json(client, 400, "{\"ok\":false,\"error\":\"DI toggle only for virtual module\"}");
+                return;
+            }
+
+            mod->inputs[di].current = state;
+            mod->inputs[di].published = true;
+            mqtt_publish_di_state(mod, di, state);
+            LOG_I("[LAN-WEB] Virtual S%d DI%d → %s\n", addr, di + 1, state ? "ON" : "OFF");
+
+            char resp[64];
+            snprintf(resp, sizeof(resp), "{\"ok\":true,\"addr\":%u,\"di\":%u,\"state\":%u}", addr, di, state ? 1 : 0);
+            eth_send_json(client, 200, resp);
+        }
+        else if (path == "/api/savemodules" || path == "/api/savepins")
+        {
+            // ── Save modules/pins config via LAN ──
+            if (!eth_auth_ok(client, fullPath))
+                return;
+            // Forward to WiFi handler logic (parse query + write NVRAM)
+            // Reuse the same query string parsing
+            String q = query.length() > 0 ? query : fullPath.substring(fullPath.indexOf('?') + 1);
+            Preferences nv;
+            nv.begin(NV_NAMESPACE, false);
+
+            int pos = 0;
+            int saved = 0;
+            while (pos < (int)q.length())
+            {
+                int amp = q.indexOf('&', pos);
+                String pair = (amp > 0) ? q.substring(pos, amp) : q.substring(pos);
+                pos = (amp > 0) ? amp + 1 : q.length();
+
+                int eq = pair.indexOf('=');
+                if (eq < 0)
+                    continue;
+                String key = urlDecode(pair.substring(0, eq));
+                String val = urlDecode(pair.substring(eq + 1));
+
+                // Module names: rn<addr>_<idx>, dn<addr>_<idx>
+                // Module list: type, addr, r1-r6, d1-d6
+                if (key.startsWith("rn") || key.startsWith("dn") || key.startsWith("mn") || key.startsWith("hn") || key.startsWith("ar"))
+                {
+                    nv.putString(key.c_str(), val);
+                    saved++;
+                }
+                else if (key == "type" || key == "addr")
+                {
+                    nv.putUChar(key.c_str(), (uint8_t)val.toInt());
+                    saved++;
+                }
+                else if (key.startsWith("r") && key.length() <= 2)
+                {
+                    // r1-r6 relay names
+                    nv.putString(key.c_str(), val);
+                    saved++;
+                }
+                else if (key.startsWith("d") && key.length() <= 2)
+                {
+                    // d1-d6 DI names
+                    nv.putString(key.c_str(), val);
+                    saved++;
+                }
+            }
+            nv.end();
+            config_load();
+
+            char resp[64];
+            snprintf(resp, sizeof(resp), "{\"ok\":true,\"saved\":%d}", saved);
+            eth_send_json(client, 200, resp);
+            LOG_I("[LAN-WEB] /api/%s: %d keys saved\n", path.c_str(), saved);
+        }
         else
         {
             eth_send_json(client, 404, "{\"error\":\"not_found\"}");

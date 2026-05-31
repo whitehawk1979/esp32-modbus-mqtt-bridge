@@ -278,6 +278,51 @@ static void handleRelay()
     }
 }
 
+// ─── Handle DI toggle (virtual module) ──────────────────────
+// GET /di?addr=200&di=0&state=1  (state: 1=ON, 0=OFF)
+static void handleDI()
+{
+    if (!web_auth_ok())
+        return;
+    if (!web.hasArg("addr") || !web.hasArg("di") || !web.hasArg("state"))
+    {
+        web.send(400, "application/json", "{\"ok\":false,\"error\":\"missing params\"}");
+        return;
+    }
+    uint8_t addr = (uint8_t)web.arg("addr").toInt();
+    uint8_t di = (uint8_t)web.arg("di").toInt();
+    bool state = web.arg("state").toInt() != 0;
+
+    Slave_Module *mod = nullptr;
+    for (uint16_t i = 0; i < module_count; i++)
+    {
+        if (modules[i].slave_addr == addr)
+        {
+            mod = &modules[i];
+            break;
+        }
+    }
+    if (!mod)
+    {
+        web.send(404, "application/json", "{\"ok\":false,\"error\":\"module not found\"}");
+        return;
+    }
+    if (!mod->is_virtual)
+    {
+        web.send(400, "application/json", "{\"ok\":false,\"error\":\"DI toggle only for virtual module\"}");
+        return;
+    }
+
+    mod->inputs[di].current = state;
+    mod->inputs[di].published = true;
+    mqtt_publish_di_state(mod, di, state);
+    LOG_I("[WEB] Virtual S%d DI%d → %s\n", addr, di + 1, state ? "ON" : "OFF");
+
+    String resp = "{\"ok\":true,\"addr\":" + String(addr) + ",\"di\":" + String(di) +
+                  ",\"state\":" + String(state ? 1 : 0) + "}";
+    web.send(200, "application/json", resp);
+}
+
 // ─── Helpers ───────────────────────────────────────────────────
 static String uptimeStr()
 {
@@ -1105,6 +1150,25 @@ function toggleRelay(addr,relay,curState){
   })
   .catch(e=>{alert('Hálózati hiba');btn.style.opacity='1';});
 }
+function toggleDI(addr,di,curState){
+  var newState=curState?0:1;
+  var btn=document.getElementById('d'+addr+'_'+di);
+  if(!btn)return;
+  btn.style.opacity='0.5';
+  fetch('/di?addr='+addr+'&di='+di+'&state='+newState)
+  .then(r=>r.json())
+  .then(d=>{
+    if(d.ok){
+      btn.textContent='DI'+(di+1)+' '+(newState?'ON':'OFF');
+      btn.className='rbtn '+(newState?'on':'off');
+      btn.onclick=function(){toggleDI(addr,di,newState);};
+    }else{
+      alert('Hiba: '+(d.error||'ismeretlen'));
+    }
+    btn.style.opacity='1';
+  })
+  .catch(e=>{alert('Hálózati hiba');btn.style.opacity='1';});
+}
 </script>
 </head><body>)rawliteral";
 
@@ -1188,13 +1252,26 @@ function toggleRelay(addr,relay,curState){
             html += "<div class=\"elabel\">Bemenetek:</div><div>";
             for (uint8_t d = 0; d < HA_V2_DI_COUNT; d++)
             {
-                if (m.inputs[d].current)
+                if (m.is_virtual)
                 {
-                    html += "<span class=\"badge on\">DI" + String(d + 1) + " ON</span>";
+                    // Virtual module: clickable toggle button
+                    String dcls = m.inputs[d].current ? "rbtn on" : "rbtn off";
+                    String dtxt = "DI" + String(d + 1) + " " + (m.inputs[d].current ? "ON" : "OFF");
+                    html += "<span id=\"d" + String(m.slave_addr) + "_" + String(d) +
+                            "\" class=\"" + dcls +
+                            "\" onclick=\"toggleDI(" + String(m.slave_addr) + "," + String(d) +
+                            "," + String(m.inputs[d].current ? 1 : 0) + ")\">" + dtxt + "</span>";
                 }
                 else
                 {
-                    html += "<span class=\"badge off\">DI" + String(d + 1) + " OFF</span>";
+                    if (m.inputs[d].current)
+                    {
+                        html += "<span class=\"badge on\">DI" + String(d + 1) + " ON</span>";
+                    }
+                    else
+                    {
+                        html += "<span class=\"badge off\">DI" + String(d + 1) + " OFF</span>";
+                    }
                 }
             }
             html += "</div>";
@@ -2323,6 +2400,7 @@ void web_server_init()
     web.on("/delroom", HTTP_GET, handleDelRoom);
     web.on("/togglevmod", HTTP_GET, handleToggleVMod);
     web.on("/relay", HTTP_GET, handleRelay);
+    web.on("/di", HTTP_GET, handleDI);
     web.on("/rescan", HTTP_POST, handleRescan);
     web.on("/restart", HTTP_GET, handleRestart);
     web.on("/logout", HTTP_GET, handleLogout);
