@@ -1,0 +1,6 @@
+// cppcheck project-wide suppressions for false positives
+// LOG_I/LOG_D macros use variables that cppcheck can't see expanded
+knownConditionTrueFalse:src/eth_handler.cpp
+unreadVariable:src/eth_handler.cpp
+unreadVariable:src/mqtt_handler.cpp
+variableScope:src/click_detector.cpp

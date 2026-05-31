@@ -1,6 +1,6 @@
 /**
  * ota_handler.cpp — OTA Firmware Update via Web Upload + ArduinoOTA
- * 
+ *
  * Handles firmware .bin upload via HTTP POST multipart.
  * Uses ESP32 Update library for in-place flash writing.
  * Also supports PlatformIO espota protocol (ArduinoOTA on port 3232).
@@ -12,6 +12,7 @@
 #include <WebServer.h>
 #include <Update.h>
 #include <ArduinoOTA.h>
+#include <HTTPClient.h>
 #include "modbus_mqtt_ha_bridge.h"
 #include "ota_handler.h"
 
@@ -19,10 +20,11 @@
 extern WebServer web;
 
 // ─── Constants ────────────────────────────────────────────────
-#define OTA_MAX_SIZE 1310720  // 1.25MB max firmware size (app partition - boot partition)
+#define OTA_MAX_SIZE 1310720 // 1.25MB max firmware size (app partition - boot partition)
 
 // ─── OTA Page ─────────────────────────────────────────────────
-void handleOtaPage() {
+void handleOtaPage()
+{
     String html = R"rawliteral(<!DOCTYPE html><html lang="hu"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Modbus-MQTT Bridge — OTA Firmware</title>
@@ -88,8 +90,10 @@ button:disabled{background:#484f58;cursor:not-allowed}
 <div class="row"><span class="key">SDK verzió</span><span class="val">)rawliteral";
 
     html += String(ESP.getSdkVersion()) + "</span></div>";
-    html += "<div class=\"row\"><span class=\"key\">Chip revision</span><span class=\"val\">" + String(ESP.getChipRevision()) + "</span></div>";
-    html += "<div class=\"row\"><span class=\"key\">Flash méret</span><span class=\"val\">" + String(ESP.getFlashChipSize() / 1024 / 1024) + " MB</span></div>";
+    html += "<div class=\"row\"><span class=\"key\">Chip revision</span><span class=\"val\">" +
+            String(ESP.getChipRevision()) + "</span></div>";
+    html += "<div class=\"row\"><span class=\"key\">Flash méret</span><span class=\"val\">" +
+            String(ESP.getFlashChipSize() / 1024 / 1024) + " MB</span></div>";
     html += "<div class=\"row\"><span class=\"key\">OTA max méret</span><span class=\"val\">1 MB</span></div>";
     html += "</div>";
 
@@ -148,92 +152,232 @@ document.getElementById('otaForm').onsubmit=function(){
 }
 
 // ─── OTA Upload Handler ──────────────────────────────────────
-void handleOtaUpload() {
+void handleOtaUpload()
+{
     // Auth check for OTA — must validate before processing upload
-    if (!web_auth_ok()) return;
+    if (!web_auth_ok())
+        return;
     HTTPUpload &upload = web.upload();
-    
-    if (upload.status == UPLOAD_FILE_START) {
+
+    if (upload.status == UPLOAD_FILE_START)
+    {
         LOG_I("[OTA] Upload start: %s (%d bytes)\n", upload.filename.c_str(), upload.totalSize);
-        
-        if (upload.totalSize > OTA_MAX_SIZE) {
+
+        if (upload.totalSize > OTA_MAX_SIZE)
+        {
             LOG_ELN("[OTA] ERROR: Firmware too large!");
             web.send(500, "text/plain", "A firmware túl nagy! Maximum 1 MB.");
             return;
         }
-        
-        if (!Update.begin(upload.totalSize)) {
+
+        if (!Update.begin(upload.totalSize))
+        {
             LOG_E("[OTA] ERROR: Update.begin failed! (%s)\n", Update.errorString());
             web.send(500, "text/plain", String("Nem sikerült elindítani a frissítést: ") + Update.errorString());
             return;
         }
         LOG_ILN("[OTA] Update started...");
-        
-    } else if (upload.status == UPLOAD_FILE_WRITE) {
+    }
+    else if (upload.status == UPLOAD_FILE_WRITE)
+    {
         LOG_D("[OTA] Writing %d bytes...\n", upload.currentSize);
+        // Yield to WiFi/TCP stack between flash writes to prevent TCP window stall
+        yield();
         size_t written = Update.write(upload.buf, upload.currentSize);
-        if (written != upload.currentSize) {
+        if (written != upload.currentSize)
+        {
             LOG_E("[OTA] ERROR: Write failed! Written %d / %d\n", written, upload.currentSize);
             web.send(500, "text/plain", String("Írási hiba: ") + Update.errorString());
             return;
         }
-        
-    } else if (upload.status == UPLOAD_FILE_END) {
+        // Brief delay to let TCP stack process ACKs and update receive window
+        delay(2);
+    }
+    else if (upload.status == UPLOAD_FILE_END)
+    {
         LOG_ILN("[OTA] Upload complete, finalizing...");
-        if (Update.end(true)) {
+        if (Update.end(true))
+        {
             LOG_I("[OTA] SUCCESS! Firmware updated (%d bytes). Restarting...\n", Update.size());
             web.send(200, "text/plain", "OK");
             delay(3000);
             ESP.restart();
-        } else {
+        }
+        else
+        {
             LOG_E("[OTA] ERROR: Update.end failed! (%s)\n", Update.errorString());
             web.send(500, "text/plain", String("Frissítés sikertelen: ") + Update.errorString());
         }
-        
-    } else if (upload.status == UPLOAD_FILE_ABORTED) {
-            LOG_ELN("[OTA] Upload aborted!");
+    }
+    else if (upload.status == UPLOAD_FILE_ABORTED)
+    {
+        LOG_ELN("[OTA] Upload aborted!");
         Update.abort();
         web.send(500, "text/plain", "Feltöltés megszakítva!");
     }
 }
 
+// ─── HTTP GET OTA: ESP32 downloads firmware from URL ────────────
+// Solves the TCP buffer overflow problem with synchronous WebServer upload.
+// The ESP32 controls the download pace — no zero-window stall possible.
+void handleOtaFromURL()
+{
+    if (!web_auth_ok())
+        return;
+
+    if (!web.hasArg("url"))
+    {
+        web.send(400, "application/json",
+                  "{\"error\":\"missing 'url' parameter\"}");
+        return;
+    }
+
+    String fwUrl = web.arg("url");
+    LOG_I("[OTA-URL] Downloading firmware from: %s\n", fwUrl.c_str());
+
+    HTTPClient http;
+    http.setConnectTimeout(10000);
+    http.setTimeout(60000);
+
+    if (!http.begin(fwUrl))
+    {
+        LOG_ELN("[OTA-URL] Failed to connect to URL");
+        web.send(500, "application/json",
+                 "{\"error\":\"connection_failed\"}");
+        return;
+    }
+
+    int httpCode = http.GET();
+    if (httpCode != HTTP_CODE_OK)
+    {
+        LOG_E("[OTA-URL] HTTP error: %d\n", httpCode);
+        http.end();
+        web.send(500, "application/json",
+                 "{\"error\":\"http_error\",\"code\":" + String(httpCode) + "}");
+        return;
+    }
+
+    int contentLength = http.getSize();
+    if (contentLength <= 0 || contentLength > OTA_MAX_SIZE)
+    {
+        LOG_E("[OTA-URL] Invalid content length: %d\n", contentLength);
+        http.end();
+        web.send(500, "application/json",
+                 "{\"error\":\"invalid_size\",\"size\":" + String(contentLength) + "}");
+        return;
+    }
+
+    if (!Update.begin(contentLength))
+    {
+        LOG_E("[OTA-URL] Update.begin failed: %s\n", Update.errorString());
+        http.end();
+        web.send(500, "application/json",
+                 "{\"error\":\"update_begin_failed\"}");
+        return;
+    }
+
+    WiFiClient *stream = http.getStreamPtr();
+    uint8_t buf[4096];
+    size_t written = 0;
+    size_t totalWritten = 0;
+
+    LOG_I("[OTA-URL] Starting download: %d bytes\n", contentLength);
+
+    while (totalWritten < (size_t)contentLength)
+    {
+        size_t available = stream->available();
+        if (available)
+        {
+            int readBytes = stream->readBytes(buf, min(available, sizeof(buf)));
+            written = Update.write(buf, readBytes);
+            if (written != (size_t)readBytes)
+            {
+                LOG_E("[OTA-URL] Write error at %d bytes\n", totalWritten);
+                Update.abort();
+                http.end();
+                web.send(500, "application/json",
+                         "{\"error\":\"write_failed\",\"at\":" + String(totalWritten) + "}");
+                return;
+            }
+            totalWritten += written;
+
+            // Progress log every 10%
+            static uint8_t lastPct = 0;
+            uint8_t pct = (totalWritten * 100) / contentLength;
+            if (pct >= lastPct + 10)
+            {
+                LOG_I("[OTA-URL] Progress: %d%% (%d/%d bytes)\n",
+                      pct, totalWritten, contentLength);
+                lastPct = pct;
+            }
+        }
+
+        // CRITICAL: yield() between reads lets WiFi/TCP stack process ACKs
+        yield();
+        delay(1); // Small delay to prevent tight loop consuming CPU
+    }
+
+    http.end();
+
+    if (Update.end(true))
+    {
+        LOG_I("[OTA-URL] SUCCESS! Firmware updated (%d bytes). Rebooting...\n", totalWritten);
+        web.send(200, "application/json",
+                 "{\"status\":\"ok\",\"bytes\":" + String(totalWritten) + ",\"rebooting\":true}");
+        delay(3000);
+        ESP.restart();
+    }
+    else
+    {
+        LOG_E("[OTA-URL] Update.end failed: %s\n", Update.errorString());
+        web.send(500, "application/json",
+                 "{\"error\":\"update_end_failed\"}");
+    }
+}
+
 // ─── Init & Loop ──────────────────────────────────────────────
-void ota_init() {
+void ota_init()
+{
     // ── ArduinoOTA (PlatformIO espota protocol, port 3232) ──
     ArduinoOTA.setHostname("modbusmqtt");
     ArduinoOTA.setPort(3232);
-    
+
     ArduinoOTA.onStart([]() {
         String type = (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
         LOG_I("[OTA] ArduinoOTA start: %s\n", type.c_str());
     });
-    ArduinoOTA.onEnd([]() {
-        LOG_ILN("[OTA] ArduinoOTA end — rebooting");
-    });
+    ArduinoOTA.onEnd([]() { LOG_ILN("[OTA] ArduinoOTA end — rebooting"); });
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
         static uint8_t last_pct = 0;
         uint8_t pct = (progress * 100) / total;
-        if (pct != last_pct && pct % 10 == 0) {
+        if (pct != last_pct && pct % 10 == 0)
+        {
             LOG_I("[OTA] Progress: %u%%\n", pct);
             last_pct = pct;
         }
     });
     ArduinoOTA.onError([](ota_error_t error) {
         LOG_E("[OTA] ArduinoOTA error[%u]: ", error);
-        if (error == OTA_AUTH_ERROR) LOG_ELN("Auth Failed");
-        else if (error == OTA_BEGIN_ERROR) LOG_ELN("Begin Failed");
-        else if (error == OTA_CONNECT_ERROR) LOG_ELN("Connect Failed");
-        else if (error == OTA_RECEIVE_ERROR) LOG_ELN("Receive Failed");
-        else if (error == OTA_END_ERROR) LOG_ELN("End Failed");
+        if (error == OTA_AUTH_ERROR)
+            LOG_ELN("Auth Failed");
+        else if (error == OTA_BEGIN_ERROR)
+            LOG_ELN("Begin Failed");
+        else if (error == OTA_CONNECT_ERROR)
+            LOG_ELN("Connect Failed");
+        else if (error == OTA_RECEIVE_ERROR)
+            LOG_ELN("Receive Failed");
+        else if (error == OTA_END_ERROR)
+            LOG_ELN("End Failed");
     });
-    
+
     ArduinoOTA.begin();
     LOG_ILN("[OTA] ArduinoOTA ready on port 3232");
-    
+
     // Routes for web-based OTA are registered in web_server_init()
     LOG_ILN("[OTA] Web upload handler ready");
 }
 
-void ota_loop() {
-    ArduinoOTA.handle();  // Process PlatformIO espota requests (safe after ota_init())
+void ota_loop()
+{
+    ArduinoOTA.handle(); // Process PlatformIO espota requests (safe after ota_init())
 }

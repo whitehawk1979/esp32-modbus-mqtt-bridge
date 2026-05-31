@@ -11,5 +11,6 @@ void ota_init();
 void ota_loop();
 void handleOtaPage();
 void handleOtaUpload();
+void handleOtaFromURL();
 
 #endif
