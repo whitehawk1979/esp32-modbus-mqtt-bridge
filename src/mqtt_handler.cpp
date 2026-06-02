@@ -27,6 +27,21 @@ static void mqtt_callback(char *topic, byte *payload, unsigned int length);
 
 // Track which transport MQTT is using (for logging + reconnect switching)
 static bool mqtt_on_lan = false;
+
+// ─── Safe MQTT publish — skips and logs if not connected ────────
+static bool mqtt_pub(const char *topic, const char *payload, bool retained = false)
+{
+    if (!mqtt.connected())
+        return false;
+    return mqtt.publish(topic, payload, retained);
+}
+
+static bool mqtt_pub(const char *topic, const char *payload, unsigned int len, bool retained = false)
+{
+    if (!mqtt.connected())
+        return false;
+    return mqtt.publish(topic, (const uint8_t *)payload, len, retained);
+}
 bool mqtt_is_on_lan() { return mqtt_on_lan; }
 
 // ─── Zero-alloc topic helpers (static char buffers, no String heap) ──
@@ -212,11 +227,11 @@ void mqtt_init()
     {
         LOG_ILN("[MQTT] Connected");
         // Birth message — ensures HA sees device online even if LWT missed
-        mqtt.publish(topic_base(0, "status"), "online", true);
+        mqtt_pub(topic_base(0, "status"), "online", true);
         // Ensure HA MQTT integration processes discovery topics
         // (HA won't process retained config topics without this)
         if (cfg.ha_discovery)
-            mqtt.publish("homeassistant/status", "online", true);
+            mqtt_pub("homeassistant/status", "online", true);
         // Publish bridge system device discovery
         mqtt_publish_bridge_discovery();
     }
@@ -229,6 +244,8 @@ void mqtt_init()
 // ─── MQTT Loop with Reconnect (exponential backoff) ───────────
 void mqtt_loop()
 {
+    static uint32_t mqtt_fail_since = 0; // 0 = connected or never failed
+    
     if (!mqtt.connected() && strlen(cfg.mqtt_host) > 0)
     {
         static uint32_t last_reconnect = 0;
@@ -276,10 +293,10 @@ void mqtt_loop()
                 LOG_ILN("[MQTT] Reconnected");
                 reconnect_attempts = 0; // Reset backoff on success
                 // Birth message on reconnect
-                mqtt.publish(topic_base(0, "status"), "online", true);
+                mqtt_pub(topic_base(0, "status"), "online", true);
                 // Ensure HA MQTT integration processes discovery topics
                 if (cfg.ha_discovery)
-                    mqtt.publish("homeassistant/status", "online", true);
+                    mqtt_pub("homeassistant/status", "online", true);
                 // Publish bridge system device discovery
                 mqtt_publish_bridge_discovery();
                 for (uint16_t i = 0; i < module_count; i++)
@@ -296,9 +313,24 @@ void mqtt_loop()
             else
             {
                 reconnect_attempts = min((uint8_t)(reconnect_attempts + 1), (uint8_t)8);
+                // Track first failure time for auto-restart
+                if (mqtt_fail_since == 0)
+                    mqtt_fail_since = millis();
+                // Auto-restart if MQTT unreachable for >5 minutes
+                if (millis() - mqtt_fail_since > 300000)
+                {
+                    LOG_E("[MQTT] Unreachable >5min — restarting ESP\n");
+                    delay(100);
+                    ESP.restart();
+                }
             }
             last_reconnect = millis();
         }
+    }
+    else
+    {
+        // Connected — reset failure timer
+        mqtt_fail_since = 0;
     }
     mqtt.loop();
 
@@ -408,25 +440,25 @@ void mqtt_cleanup_discovery(Slave_Module *mod)
     // Relays
     for (uint8_t r = 0; r < mod->model.RELAY_COUNT; r++)
     {
-        mqtt.publish(discovery_topic("switch", unique_id(mod->slave_addr, "relay", r)), "", true);
+        mqtt_pub(discovery_topic("switch", unique_id(mod->slave_addr, "relay", r)), "", true);
     }
 
     // DI binary sensors
     for (uint8_t d = 0; d < mod->model.DI_COUNT; d++)
     {
-        mqtt.publish(discovery_topic("binary_sensor", unique_id(mod->slave_addr, "di", d)), "", true);
+        mqtt_pub(discovery_topic("binary_sensor", unique_id(mod->slave_addr, "di", d)), "", true);
         // Click sensors
-        mqtt.publish(discovery_topic("sensor", unique_id(mod->slave_addr, "click", d)), "", true);
+        mqtt_pub(discovery_topic("sensor", unique_id(mod->slave_addr, "click", d)), "", true);
     }
 
     // Module status sensor
     static char uid_buf[64];
     snprintf(uid_buf, sizeof(uid_buf), "%s_avail", unique_id(mod->slave_addr, "status", 0));
-    mqtt.publish(discovery_topic("binary_sensor", uid_buf), "", true);
-    mqtt.publish(discovery_topic("sensor", unique_id(mod->slave_addr, "status", 0)), "", true);
+    mqtt_pub(discovery_topic("binary_sensor", uid_buf), "", true);
+    mqtt_pub(discovery_topic("sensor", unique_id(mod->slave_addr, "status", 0)), "", true);
 
     // Slave address sensor
-    mqtt.publish(discovery_topic("sensor", unique_id(mod->slave_addr, "addr", 0)), "", true);
+    mqtt_pub(discovery_topic("sensor", unique_id(mod->slave_addr, "addr", 0)), "", true);
 
     LOG_I("[MQTT] Cleaned up discovery for module S%d\n", mod->slave_addr);
 }
@@ -465,6 +497,11 @@ static void set_availability(JsonDocument &doc)
 // Uses PSRAM buffer when available to reduce heap pressure on large payloads.
 static bool discovery_publish(const char *topic, JsonDocument &doc, bool retain = true)
 {
+    if (!mqtt.connected())
+    {
+        LOG_I("[MQTT] Discovery skip: not connected\n");
+        return false;
+    }
     size_t json_size = measureJson(doc) + 1;
     // Allocate buffer in PSRAM if available, otherwise heap
     char *buf = reinterpret_cast<char *>(psram_malloc(json_size));
@@ -474,13 +511,18 @@ static bool discovery_publish(const char *topic, JsonDocument &doc, bool retain 
         return false;
     }
     serializeJson(doc, buf, json_size);
-    bool ok = mqtt.publish(topic, buf, retain);
+    bool ok = mqtt_pub(topic, buf, retain);
     free(buf);
     return ok;
 }
 
 void mqtt_publish_discovery(Slave_Module *mod)
 {
+    if (!mqtt.connected())
+    {
+        LOG_I("[MQTT] Discovery skip: not connected (S%d)\n", mod->slave_addr);
+        return;
+    }
     if (!cfg.ha_discovery)
     {
         LOG_I("[MQTT] Discovery disabled, skipping module %d\n", mod->slave_addr);
@@ -605,7 +647,7 @@ void mqtt_publish_discovery(Slave_Module *mod)
     {
         static char addr_val[8];
         snprintf(addr_val, sizeof(addr_val), "%d", mod->slave_addr);
-        mqtt.publish(topic_base(mod->slave_addr, "address"), addr_val, true);
+        mqtt_pub(topic_base(mod->slave_addr, "address"), addr_val, true);
     }
 
     LOG_I("[MQTT] Discovery: S%d (%dR, %dDI, %dDI-Click, 1Addr)\n",
@@ -619,11 +661,11 @@ void mqtt_publish_discovery(Slave_Module *mod)
     String mod_area = config_get_module_area(mod->slave_addr);
     if (mqtt_name.length() > 0)
     {
-        mqtt.publish(topic_base(mod->slave_addr, "name"), mqtt_name.c_str(), true);
+        mqtt_pub(topic_base(mod->slave_addr, "name"), mqtt_name.c_str(), true);
     }
     if (mod_area.length() > 0)
     {
-        mqtt.publish(topic_base(mod->slave_addr, "area"), mod_area.c_str(), true);
+        mqtt_pub(topic_base(mod->slave_addr, "area"), mod_area.c_str(), true);
     }
 
     // Publish all relay/DI names as retained sub-topics
@@ -632,7 +674,7 @@ void mqtt_publish_discovery(Slave_Module *mod)
         String rname = config_get_relay_name(mod->slave_addr, r);
         if (rname.length() > 0)
         {
-            mqtt.publish(topic_suffix(mod->slave_addr, "relay/", r, "name"), rname.c_str(), true);
+            mqtt_pub(topic_suffix(mod->slave_addr, "relay/", r, "name"), rname.c_str(), true);
         }
     }
     for (uint8_t d = 0; d < mod->model.DI_COUNT; d++)
@@ -640,7 +682,7 @@ void mqtt_publish_discovery(Slave_Module *mod)
         String dname = config_get_di_name(mod->slave_addr, d);
         if (dname.length() > 0)
         {
-            mqtt.publish(topic_suffix(mod->slave_addr, "di/", d, "name"), dname.c_str(), true);
+            mqtt_pub(topic_suffix(mod->slave_addr, "di/", d, "name"), dname.c_str(), true);
         }
     }
 }
@@ -648,14 +690,14 @@ void mqtt_publish_discovery(Slave_Module *mod)
 // ─── Publish Relay State ────────────────────────────────────────
 void mqtt_publish_relay_state(Slave_Module *mod, uint8_t relay_idx)
 {
-    mqtt.publish(topic_suffix(mod->slave_addr, "relay/", relay_idx, "state"),
+    mqtt_pub(topic_suffix(mod->slave_addr, "relay/", relay_idx, "state"),
                  mod->relays[relay_idx].state ? "ON" : "OFF", MQTT_RETAIN_STATE);
 
     // Publish relay name as retained sub-topic (for MQTT Explorer visibility)
     String name = config_get_relay_name(mod->slave_addr, relay_idx);
     if (name.length() > 0)
     {
-        mqtt.publish(topic_suffix(mod->slave_addr, "relay/", relay_idx, "name"), name.c_str(), true);
+        mqtt_pub(topic_suffix(mod->slave_addr, "relay/", relay_idx, "name"), name.c_str(), true);
     }
 
     // Notify WebSocket clients
@@ -665,14 +707,14 @@ void mqtt_publish_relay_state(Slave_Module *mod, uint8_t relay_idx)
 // ─── Publish DI State ──────────────────────────────────────────
 void mqtt_publish_di_state(Slave_Module *mod, uint8_t di_idx, bool state)
 {
-    mqtt.publish(topic_suffix(mod->slave_addr, "di/", di_idx, "state"),
+    mqtt_pub(topic_suffix(mod->slave_addr, "di/", di_idx, "state"),
                  state ? "ON" : "OFF", MQTT_RETAIN_STATE);
 
     // Publish DI name as retained sub-topic (for MQTT Explorer visibility)
     String name = config_get_di_name(mod->slave_addr, di_idx);
     if (name.length() > 0)
     {
-        mqtt.publish(topic_suffix(mod->slave_addr, "di/", di_idx, "name"), name.c_str(), true);
+        mqtt_pub(topic_suffix(mod->slave_addr, "di/", di_idx, "name"), name.c_str(), true);
     }
 
     // Notify WebSocket clients
@@ -683,7 +725,7 @@ void mqtt_publish_di_state(Slave_Module *mod, uint8_t di_idx, bool state)
 void mqtt_publish_click_event(Slave_Module *mod, uint8_t di_idx, ClickType ct)
 {
     const char *click_str = click_type_str(ct);
-    mqtt.publish(topic_suffix(mod->slave_addr, "di/", di_idx, "click"), click_str, false);
+    mqtt_pub(topic_suffix(mod->slave_addr, "di/", di_idx, "click"), click_str, false);
 
     LOG_D("[MQTT] Click: S%d DI%d: %s\n", mod->slave_addr, di_idx + 1, click_str);
 }
@@ -691,7 +733,7 @@ void mqtt_publish_click_event(Slave_Module *mod, uint8_t di_idx, ClickType ct)
 // ─── Publish Module Online Status ──────────────────────────────
 void mqtt_publish_module_online(Slave_Module *mod, bool online)
 {
-    mqtt.publish(topic_base(mod->slave_addr, "status"), online ? "online" : "offline", true);
+    mqtt_pub(topic_base(mod->slave_addr, "status"), online ? "online" : "offline", true);
 }
 
 // ─── Publish Modbus Stats ──────────────────────────────────────
@@ -719,7 +761,7 @@ void mqtt_publish_stats()
         serializeJson(doc, buf, json_size);
         static char stats_topic[128];
         snprintf(stats_topic, sizeof(stats_topic), "%s/ha_v2/stats", cfg.mqtt_prefix);
-        mqtt.publish(stats_topic, buf, false);
+        mqtt_pub(stats_topic, buf, false);
         free(buf);
     }
 }
@@ -869,11 +911,11 @@ void mqtt_publish_bridge_state()
     {
         static char rssi_val[12];
         snprintf(rssi_val, sizeof(rssi_val), "%d", WiFi.RSSI());
-        mqtt.publish(topic_buf, rssi_val, false);
+        mqtt_pub(topic_buf, rssi_val, false);
     }
     else
     {
-        mqtt.publish(topic_buf, "unavailable", false);
+        mqtt_pub(topic_buf, "unavailable", false);
     }
 
     // Free heap
@@ -881,19 +923,19 @@ void mqtt_publish_bridge_state()
     {
         static char heap_val[16];
         snprintf(heap_val, sizeof(heap_val), "%u", ESP.getFreeHeap());
-        mqtt.publish(topic_buf, heap_val, false);
+        mqtt_pub(topic_buf, heap_val, false);
     }
 
     // Firmware version
     snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/fw_version", cfg.mqtt_prefix);
-    mqtt.publish(topic_buf, FIRMWARE_VERSION, true);
+    mqtt_pub(topic_buf, FIRMWARE_VERSION, true);
 
     // Uptime in seconds
     snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/uptime", cfg.mqtt_prefix);
     {
         static char uptime_val[16];
         snprintf(uptime_val, sizeof(uptime_val), "%lu", millis() / 1000);
-        mqtt.publish(topic_buf, uptime_val, false);
+        mqtt_pub(topic_buf, uptime_val, false);
     }
 
     // Active interface
@@ -911,17 +953,17 @@ void mqtt_publish_bridge_state()
         if_name = "NONE";
         break;
     }
-    mqtt.publish(topic_buf, if_name, false);
+    mqtt_pub(topic_buf, if_name, false);
 
     // IP address
     snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/ip", cfg.mqtt_prefix);
     if (net_connected)
     {
-        mqtt.publish(topic_buf, active_ip.c_str(), false);
+        mqtt_pub(topic_buf, active_ip.c_str(), false);
     }
     else
     {
-        mqtt.publish(topic_buf, "unavailable", false);
+        mqtt_pub(topic_buf, "unavailable", false);
     }
 
     // PSRAM free
@@ -929,7 +971,7 @@ void mqtt_publish_bridge_state()
     {
         static char psram_val[16];
         snprintf(psram_val, sizeof(psram_val), "%u", psram_free());
-        mqtt.publish(topic_buf, psram_val, false);
+        mqtt_pub(topic_buf, psram_val, false);
     }
 
     // Notify watchdog that MQTT is alive
