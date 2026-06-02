@@ -191,6 +191,7 @@ enum NetInterface : uint8_t
 #define NV_KEY_MOD_LIST_N "mlist_n" // Number of saved modules (0=none)
 #define NV_KEY_MOD_ADDR "mlist_a"   // Saved slave address prefix: mlist_a0..15
 #define NV_KEY_MOD_MODEL "mlist_m"  // Saved model_id prefix: mlist_m0..15
+#define NV_KEY_MOD_DIRM "mlist_dr"  // DI→Relay map prefix: mlist_dr0..15 (blob[6])
 #define MAX_SAVED_MODULES 16        // Max modules in saved list
 #define NV_KEY_ROOMS "rooms"        // Custom room list (newline-separated)
 #define MAX_ROOMS 30
@@ -263,6 +264,7 @@ struct Slave_Module
     uint8_t profile;                       // Per-slave profile override (0 = use global)
     Relay_State relays[HA_V2_RELAY_COUNT]; // Always 6
     DI_State inputs[HA_V2_DI_COUNT];       // Always 6
+    uint8_t di_relay_map[HA_V2_DI_COUNT];  // DI→Relay mapping (255 = none)
     bool discovered;
     bool active;     // Slot in use
     bool is_virtual; // Virtual module (no physical hardware)

@@ -266,6 +266,7 @@ void module_add_from_scan(uint8_t addr, uint8_t model_id)
     if (!alloc_module(&mod))
         return;
     memset(mod, 0, sizeof(Slave_Module));
+    memset(mod->di_relay_map, 0xFF, HA_V2_DI_COUNT); // 255 = no mapping
     mod->slave_addr = addr;
     mod->online = true;
     mod->last_seen_ms = millis();
@@ -291,6 +292,7 @@ void module_add_virtual()
     if (!alloc_module(&vmod))
         return;
     memset(vmod, 0, sizeof(Slave_Module));
+    memset(vmod->di_relay_map, 0xFF, HA_V2_DI_COUNT); // 255 = no mapping
     vmod->slave_addr = 200;
     vmod->online = true;
     vmod->last_seen_ms = millis();
@@ -461,6 +463,18 @@ static void poll_all_modules()
                     }
                     if (di_states[d] != prev_state)
                     {
+                        // ── DI→Relay local mapping: toggle mapped relay on DI change ──
+                        uint8_t mapped = mod.di_relay_map[d];
+                        if (mapped != 0xFF && mapped < HA_V2_RELAY_COUNT)
+                        {
+                            bool new_relay = !mod.relays[mapped].state;
+                            mod.relays[mapped].state = new_relay;
+                            mod.relays[mapped].published = false;
+                            modbus_write_coil(mod.slave_addr, mapped, new_relay);
+                            LOG_I("[DI→RELAY] S%d DI%d→R%d: %s\n",
+                                  mod.slave_addr, d + 1, mapped + 1,
+                                  new_relay ? "ON" : "OFF");
+                        }
                         mqtt_publish_di_state(&mod, d, di_states[d]);
                     }
                 }
@@ -502,6 +516,18 @@ static void poll_all_modules()
                     }
                     if (di_states[d] != prev_state)
                     {
+                        // ── DI→Relay local mapping: toggle mapped relay on DI change ──
+                        uint8_t mapped = mod.di_relay_map[d];
+                        if (mapped != 0xFF && mapped < HA_V2_RELAY_COUNT)
+                        {
+                            bool new_relay = !mod.relays[mapped].state;
+                            mod.relays[mapped].state = new_relay;
+                            mod.relays[mapped].published = false;
+                            modbus_write_coil(mod.slave_addr, mapped, new_relay);
+                            LOG_I("[DI→RELAY] S%d DI%d→R%d: %s\n",
+                                  mod.slave_addr, d + 1, mapped + 1,
+                                  new_relay ? "ON" : "OFF");
+                        }
                         mqtt_publish_di_state(&mod, d, di_states[d]);
                     }
                 }
@@ -687,12 +713,18 @@ static void do_staged_init()
             nv.begin(NV_NAMESPACE, true);
             for (uint8_t i = 0; i < saved_count; i++)
             {
-                char akey[12], mkey[12];
+                char akey[12], mkey[12], drkey[12];
                 snprintf(akey, sizeof(akey), "%s%u", NV_KEY_MOD_ADDR, i);
                 snprintf(mkey, sizeof(mkey), "%s%u", NV_KEY_MOD_MODEL, i);
+                snprintf(drkey, sizeof(drkey), "%s%u", NV_KEY_MOD_DIRM, i);
                 uint8_t addr = nv.getUChar(akey, 0);
                 uint8_t model_id = nv.getUChar(mkey, 0);
                 module_add_from_scan(addr, model_id);
+                // Restore DI→Relay mapping from NVRAM
+                uint8_t drmap[HA_V2_DI_COUNT];
+                nv.getBytes(drkey, drmap, HA_V2_DI_COUNT);
+                if (modules[i].active)
+                    memcpy(modules[i].di_relay_map, drmap, HA_V2_DI_COUNT);
             }
             nv.end();
             // Add virtual module if enabled

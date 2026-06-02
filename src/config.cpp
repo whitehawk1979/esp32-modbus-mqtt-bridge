@@ -661,11 +661,13 @@ void config_save_module_list()
     nv.putUChar(NV_KEY_MOD_LIST_N, count);
     for (uint8_t i = 0; i < count; i++)
     {
-        char akey[12], mkey[12];
+        char akey[12], mkey[12], drkey[12];
         snprintf(akey, sizeof(akey), "%s%u", NV_KEY_MOD_ADDR, i);
         snprintf(mkey, sizeof(mkey), "%s%u", NV_KEY_MOD_MODEL, i);
+        snprintf(drkey, sizeof(drkey), "%s%u", NV_KEY_MOD_DIRM, i);
         nv.putUChar(akey, modules[i].slave_addr);
         nv.putUChar(mkey, modules[i].model.model_id);
+        nv.putBytes(drkey, modules[i].di_relay_map, HA_V2_DI_COUNT);
     }
     nv.end();
     LOG_I("[CONFIG] Module list saved: %u modules\n", count);
@@ -712,11 +714,13 @@ void config_clear_module_list()
     uint8_t count = nv.getUChar(NV_KEY_MOD_LIST_N, 0);
     for (uint8_t i = 0; i < count && i < MAX_SAVED_MODULES; i++)
     {
-        char akey[12], mkey[12];
+        char akey[12], mkey[12], drkey[12];
         snprintf(akey, sizeof(akey), "%s%u", NV_KEY_MOD_ADDR, i);
         snprintf(mkey, sizeof(mkey), "%s%u", NV_KEY_MOD_MODEL, i);
+        snprintf(drkey, sizeof(drkey), "%s%u", NV_KEY_MOD_DIRM, i);
         nv.remove(akey);
         nv.remove(mkey);
+        nv.remove(drkey);
     }
     nv.putUChar(NV_KEY_MOD_LIST_N, 0);
     nv.end();

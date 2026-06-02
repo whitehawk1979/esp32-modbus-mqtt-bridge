@@ -1136,6 +1136,15 @@ static void handleModules()
 .rbtn.off{background:#f851494d;color:#f85149;border:1px solid #f8514940}
 </style>
 <script>
+var _auth=(location.search.match(/auth=([^&]+)/)||[])[1]||'';
+function setDiRelay(addr,di,val){
+  var q='/api/direlay?addr='+addr+'&d'+di+'='+val;
+  if(_auth)q+='&auth='+_auth;
+  fetch(q,{method:'POST'})
+  .then(r=>r.json())
+  .then(d=>{if(!d.ok)alert('Hiba a mentésnél');})
+  .catch(e=>{alert('Hálózati hiba');});
+}
 function roomChanged(sel){
   var other=sel.parentElement.querySelector('.room-other');
   if(!other)other=sel.nextElementSibling;
@@ -1283,6 +1292,15 @@ function toggleDI(addr,di,curState){
                         html += "<span class=\"badge off\">DI" + String(d + 1) + " OFF</span>";
                     }
                 }
+                // ── DI→Relay mapping selector ──
+                html += "<select id=\"dr" + String(m.slave_addr) + "_" + String(d) +
+                         "\" onchange=\"setDiRelay(" + String(m.slave_addr) + "," + String(d) + ",this.value)\" style=\"font-size:11px;margin-left:4px;\">";
+                html += "<option value=\"255\"" + String(m.di_relay_map[d] == 255 ? " selected" : "") + ">—</option>";
+                for (uint8_t r = 0; r < m.model.RELAY_COUNT; r++)
+                    html += "<option value=\"" + String(r) + "\"" +
+                             String(m.di_relay_map[d] == r ? " selected" : "") +
+                             ">R" + String(r + 1) + "</option>";
+                html += "</select>";
             }
             html += "</div>";
 
@@ -1938,11 +1956,57 @@ static void handleApiModules()
             {
                 inputs[String(d)] = modules[i].inputs[d].current ? "ON" : "OFF";
             }
+            // DI→Relay mapping
+            JsonArray drmap = m["di_relay_map"].to<JsonArray>();
+            for (uint8_t d = 0; d < modules[i].model.DI_COUNT; d++)
+                drmap.add(modules[i].di_relay_map[d]);
         }
     }
     String payload;
     serializeJson(doc, payload);
     WS->send(200, "application/json", payload);
+}
+
+// ─── DI→Relay mapping API ────────────────────────────────────
+// POST /api/direlay?addr=S200&d0=0&d1=255&d2=1&d3=255&d4=255&d5=255
+// dN = relay index (0-5) or 255 = no mapping
+static void handleApiDiRelay()
+{
+    if (!web_auth_ok())
+        return;
+    if (!WS->hasArg("addr"))
+    {
+        WS->send(400, "text/plain", "Missing addr");
+        return;
+    }
+    uint8_t addr = (uint8_t)WS->arg("addr").toInt();
+    Slave_Module *mod = nullptr;
+    for (uint16_t i = 0; i < module_count; i++)
+    {
+        if (modules[i].slave_addr == addr && modules[i].active)
+        {
+            mod = &modules[i];
+            break;
+        }
+    }
+    if (!mod)
+    {
+        WS->send(404, "text/plain", "Module not found");
+        return;
+    }
+    // Update DI→Relay mapping
+    for (uint8_t d = 0; d < HA_V2_DI_COUNT; d++)
+    {
+        String key = "d" + String(d);
+        if (WS->hasArg(key))
+        {
+            int val = WS->arg(key).toInt();
+            mod->di_relay_map[d] = (uint8_t)constrain(val, 0, 255);
+        }
+    }
+    config_save_module_list(); // Persist to NVRAM
+    LOG_I("[API] DI→Relay map saved for S%d\n", addr);
+    WS->send(200, "application/json", "{\"ok\":true}");
 }
 
 // ─── Full Config Export API ──────────────────────────────────
@@ -2424,6 +2488,7 @@ void web_server_init()
     web.on("/api/status", HTTP_GET, handleApiStatus);
     web.on("/api/config", HTTP_GET, handleApiConfig);
     web.on("/api/modules", HTTP_GET, handleApiModules);
+    web.on("/api/direlay", HTTP_POST, handleApiDiRelay);
     web.on("/api/lan", HTTP_GET, handleApiLan);
     web.begin();
     LOG_ILN("[WEB] Status & Config server started on port 80");
@@ -2454,6 +2519,7 @@ void web_server_init()
     ethWeb.on("/api/status", ETH_HTTP_GET, handleApiStatus);
     ethWeb.on("/api/config", ETH_HTTP_GET, handleApiConfig);
     ethWeb.on("/api/modules", ETH_HTTP_GET, handleApiModules);
+    ethWeb.on("/api/direlay", ETH_HTTP_POST, handleApiDiRelay);
     ethWeb.on("/api/lan", ETH_HTTP_GET, handleApiLan);
     ethWeb.on("/api/backup", ETH_HTTP_GET, handleApiBackup);
     ethWeb.on("/api/restore", ETH_HTTP_POST, handleApiRestore);
