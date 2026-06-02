@@ -14,6 +14,8 @@
 #include <WiFi.h>
 #include <Preferences.h>
 #include <esp_task_wdt.h>
+#include <HTTPClient.h>
+#include <Update.h>
 #include "modbus_mqtt_ha_bridge.h"
 
 // ─── URL Decode helper (for /api/save-wifi query params) ──────
@@ -606,6 +608,105 @@ void eth_web_loop()
             eth_send_text(client, 200, "Rebooting...");
             delay(500);
             ESP.restart();
+        }
+        else if (path == "/api/otaurl")
+        {
+            // ── OTA from URL (LAN-safe: ESP32 pulls firmware, no upload WDT issue) ──
+            if (!eth_auth_ok(client, fullPath))
+                return;
+            // Extract url= param from query string
+            String fwUrl;
+            int urlPos = query.indexOf("url=");
+            if (urlPos >= 0)
+            {
+                int urlStart = urlPos + 4;
+                int urlEnd = query.indexOf('&', urlStart);
+                fwUrl = urlDecode((urlEnd > 0) ? query.substring(urlStart, urlEnd) : query.substring(urlStart));
+            }
+            if (fwUrl.length() == 0)
+            {
+                eth_send_json(client, 400, "{\"error\":\"missing 'url' parameter\"}");
+                return;
+            }
+            LOG_I("[LAN-OTA-URL] Downloading firmware from: %s\n", fwUrl.c_str());
+
+            HTTPClient http;
+            http.setConnectTimeout(10000);
+            http.setTimeout(60000);
+            if (!http.begin(fwUrl))
+            {
+                LOG_ELN("[LAN-OTA-URL] Failed to connect to URL");
+                eth_send_json(client, 500, "{\"error\":\"connection_failed\"}");
+                return;
+            }
+            int httpCode = http.GET();
+            if (httpCode != HTTP_CODE_OK)
+            {
+                LOG_E("[LAN-OTA-URL] HTTP error: %d\n", httpCode);
+                http.end();
+                char errBuf[80];
+                snprintf(errBuf, sizeof(errBuf), "{\"error\":\"http_error\",\"code\":%d}", httpCode);
+                eth_send_json(client, 500, errBuf);
+                return;
+            }
+            int contentLength = http.getSize();
+            if (contentLength <= 0 || contentLength > OTA_MAX_SIZE)
+            {
+                LOG_E("[LAN-OTA-URL] Invalid content length: %d\n", contentLength);
+                http.end();
+                char errBuf[80];
+                snprintf(errBuf, sizeof(errBuf), "{\"error\":\"invalid_size\",\"size\":%d}", contentLength);
+                eth_send_json(client, 500, errBuf);
+                return;
+            }
+            if (!Update.begin(contentLength))
+            {
+                LOG_E("[LAN-OTA-URL] Update.begin failed: %s\n", Update.errorString());
+                http.end();
+                eth_send_json(client, 500, "{\"error\":\"update_begin_failed\"}");
+                return;
+            }
+            WiFiClient *stream = http.getStreamPtr();
+            uint8_t buf[4096];
+            size_t totalWritten = 0;
+            LOG_I("[LAN-OTA-URL] Starting download: %d bytes\n", contentLength);
+            while (totalWritten < (size_t)contentLength)
+            {
+                size_t available = stream->available();
+                if (available)
+                {
+                    int readBytes = stream->readBytes(buf, min(available, sizeof(buf)));
+                    size_t written = Update.write(buf, readBytes);
+                    if (written != (size_t)readBytes)
+                    {
+                        LOG_E("[LAN-OTA-URL] Write error at %d bytes\n", totalWritten);
+                        Update.abort();
+                        http.end();
+                        char errBuf[80];
+                        snprintf(errBuf, sizeof(errBuf), "{\"error\":\"write_failed\",\"at\":%d}", totalWritten);
+                        eth_send_json(client, 500, errBuf);
+                        return;
+                    }
+                    totalWritten += written;
+                }
+                yield();
+                delay(1);
+            }
+            http.end();
+            if (Update.end(true))
+            {
+                LOG_I("[LAN-OTA-URL] SUCCESS! Firmware updated (%d bytes). Rebooting...\n", totalWritten);
+                char okBuf[80];
+                snprintf(okBuf, sizeof(okBuf), "{\"status\":\"ok\",\"bytes\":%d,\"rebooting\":true}", totalWritten);
+                eth_send_json(client, 200, okBuf);
+                delay(3000);
+                ESP.restart();
+            }
+            else
+            {
+                LOG_E("[LAN-OTA-URL] Update.end failed: %s\n", Update.errorString());
+                eth_send_json(client, 500, "{\"error\":\"update_end_failed\"}");
+            }
         }
         else if (path == "/api/wifi-reconnect")
         {

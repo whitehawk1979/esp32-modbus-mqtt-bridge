@@ -20,7 +20,7 @@
 extern WebServer web;
 
 // ─── Constants ────────────────────────────────────────────────
-#define OTA_MAX_SIZE 1310720 // 1.25MB max firmware size (app partition - boot partition)
+// OTA_MAX_SIZE defined in modbus_mqtt_ha_bridge.h
 
 // ─── OTA Page ─────────────────────────────────────────────────
 void handleOtaPage()

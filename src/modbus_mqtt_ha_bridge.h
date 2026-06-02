@@ -94,12 +94,13 @@
 #define MQTT_KEEPALIVE_S 60
 #define MQTT_SOCKET_TIMEOUT 5000
 #define MQTT_MAX_PACKET 2048
+#define OTA_MAX_SIZE 1310720 // 1.25MB max firmware (app0 partition 1280KB - margin)
 #define MQTT_QOS 1
 #define MQTT_RETAIN_STATE true
 #define MQTT_RECONNECT_MS 5000
 
 // ─── Firmware Version ────────────────────────────────────────
-#define FIRMWARE_VERSION "2.5.2" // Major.Minor.Patch
+#define FIRMWARE_VERSION "2.6.0" // Major.Minor.Patch
 
 // ─── TCP Modbus Bridge ─────────────────────────────────────────
 #define TCP_PORT 502
