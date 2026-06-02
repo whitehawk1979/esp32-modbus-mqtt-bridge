@@ -1,5 +1,7 @@
 /**
- * mqtt_handler.cpp — MQTT Publishing & HA Discovery v2.0
+ * mqtt_handler.cpp — MQTT Publishing & HA Discovery v2.1
+ * Zero-alloc topic helpers (static char buffers, no String heap in hot paths).
+ * PSRAM-backed JsonDocument for discovery, PSRAM malloc for serialize buffer.
  * Uses global cfg struct instead of NVRAM reads.
  * Supports hostname-based object_id, custom friendly names,
  * birth message, stats publishing, and DI click events.
@@ -27,26 +29,48 @@ static void mqtt_callback(char *topic, byte *payload, unsigned int length);
 static bool mqtt_on_lan = false;
 bool mqtt_is_on_lan() { return mqtt_on_lan; }
 
-static String topic_base(uint8_t slave, const String &suffix = "")
+// ─── Zero-alloc topic helpers (static char buffers, no String heap) ──
+// Each function returns a pointer to its own static buffer.
+// Thread-safety: single-threaded Arduino loop — safe.
+// Callers must use the result before the next call to the same function.
+
+static const char *topic_base(uint8_t slave, const char *suffix = "")
 {
-    String t = String(cfg.mqtt_prefix) + "/ha_v2/";
-    if (slave > 0)
-        t += String(slave) + "/";
-    if (suffix.length() > 0)
-        t += suffix;
-    return t;
+    static char buf[128];
+    if (slave > 0 && suffix[0] != '\0')
+        snprintf(buf, sizeof(buf), "%s/ha_v2/%u/%s", cfg.mqtt_prefix, slave, suffix);
+    else if (slave > 0)
+        snprintf(buf, sizeof(buf), "%s/ha_v2/%u", cfg.mqtt_prefix, slave);
+    else if (suffix[0] != '\0')
+        snprintf(buf, sizeof(buf), "%s/ha_v2/%s", cfg.mqtt_prefix, suffix);
+    else
+        snprintf(buf, sizeof(buf), "%s/ha_v2", cfg.mqtt_prefix);
+    return buf;
 }
 
-static String discovery_topic(const char *domain, const String &obj_id)
+static const char *discovery_topic(const char *domain, const char *obj_id)
 {
-    return String("homeassistant/") + domain + "/" + String(cfg.hostname) + "_" + obj_id + "/config";
+    static char buf[192];
+    snprintf(buf, sizeof(buf), "homeassistant/%s/%s_%s/config", domain, cfg.hostname, obj_id);
+    return buf;
 }
 
-static String unique_id(uint8_t slave, const char *type, uint8_t idx)
+static const char *unique_id(uint8_t slave, const char *type, uint8_t idx)
 {
-    char buf[48];
-    snprintf(buf, sizeof(buf), "%s_s%d_%s_%d", cfg.hostname, slave, type, idx);
-    return String(buf);
+    static char buf[48];
+    snprintf(buf, sizeof(buf), "%s_s%d_%s_%u", cfg.hostname, slave, type, idx);
+    return buf;
+}
+
+// Suffixed topic helper for relay/DI sub-topics (local buffer, no String heap)
+static const char *topic_suffix(uint8_t slave, const char *fmt, uint8_t idx, const char *sub = "")
+{
+    static char buf[160];
+    if (sub[0] != '\0')
+        snprintf(buf, sizeof(buf), "%s/ha_v2/%u/%s%u/%s", cfg.mqtt_prefix, slave, fmt, idx, sub);
+    else
+        snprintf(buf, sizeof(buf), "%s/ha_v2/%u/%s%u", cfg.mqtt_prefix, slave, fmt, idx);
+    return buf;
 }
 
 // ─── Get display name for a module entity ──────────────────────
@@ -173,19 +197,22 @@ void mqtt_init()
     mqtt.setBufferSize(MQTT_MAX_PACKET);
     mqtt.setCallback(mqtt_callback);
 
+    static char client_id[64];
+    snprintf(client_id, sizeof(client_id), "%s_bridge", cfg.hostname);
+
     LOG_I("[MQTT] Connecting to %s:%d (TLS=%s)...\n", cfg.mqtt_host, cfg.mqtt_port, cfg.mqtt_tls ? "ON" : "OFF");
 
-    if (mqtt.connect((String(cfg.hostname) + "_bridge").c_str(),
+    if (mqtt.connect(client_id,
                      cfg.mqtt_user[0] ? cfg.mqtt_user : NULL,
                      cfg.mqtt_pass[0] ? cfg.mqtt_pass : NULL,
-                     topic_base(0, "status").c_str(),
+                     topic_base(0, "status"),
                      MQTT_QOS,
                      true,
                      "offline"))
     {
         LOG_ILN("[MQTT] Connected");
         // Birth message — ensures HA sees device online even if LWT missed
-        mqtt.publish(topic_base(0, "status").c_str(), "online", true);
+        mqtt.publish(topic_base(0, "status"), "online", true);
         // Ensure HA MQTT integration processes discovery topics
         // (HA won't process retained config topics without this)
         if (cfg.ha_discovery)
@@ -235,10 +262,13 @@ void mqtt_loop()
                 }
             }
 
-            if (mqtt.connect((String(cfg.hostname) + "_bridge").c_str(),
+            static char client_id[64];
+            snprintf(client_id, sizeof(client_id), "%s_bridge", cfg.hostname);
+
+            if (mqtt.connect(client_id,
                              cfg.mqtt_user[0] ? cfg.mqtt_user : NULL,
                              cfg.mqtt_pass[0] ? cfg.mqtt_pass : NULL,
-                             topic_base(0, "status").c_str(),
+                             topic_base(0, "status"),
                              MQTT_QOS,
                              true,
                              "offline"))
@@ -246,7 +276,7 @@ void mqtt_loop()
                 LOG_ILN("[MQTT] Reconnected");
                 reconnect_attempts = 0; // Reset backoff on success
                 // Birth message on reconnect
-                mqtt.publish(topic_base(0, "status").c_str(), "online", true);
+                mqtt.publish(topic_base(0, "status"), "online", true);
                 // Ensure HA MQTT integration processes discovery topics
                 if (cfg.ha_discovery)
                     mqtt.publish("homeassistant/status", "online", true);
@@ -362,9 +392,9 @@ void mqtt_subscribe_commands(Slave_Module *mod)
 {
     for (uint8_t r = 0; r < mod->model.RELAY_COUNT; r++)
     {
-        String cmd_topic = topic_base(mod->slave_addr, "relay/" + String(r) + "/set");
-        bool ok = mqtt.subscribe(cmd_topic.c_str(), MQTT_QOS);
-        LOG_D("[MQTT] Subscribe %s → %s\n", cmd_topic.c_str(), ok ? "OK" : "FAIL");
+        const char *cmd_topic = topic_suffix(mod->slave_addr, "relay/", r, "set");
+        bool ok = mqtt.subscribe(cmd_topic, MQTT_QOS);
+        LOG_D("[MQTT] Subscribe %s → %s\n", cmd_topic, ok ? "OK" : "FAIL");
     }
 }
 
@@ -378,30 +408,25 @@ void mqtt_cleanup_discovery(Slave_Module *mod)
     // Relays
     for (uint8_t r = 0; r < mod->model.RELAY_COUNT; r++)
     {
-        String uid = unique_id(mod->slave_addr, "relay", r);
-        mqtt.publish(discovery_topic("switch", uid).c_str(), "", true);
+        mqtt.publish(discovery_topic("switch", unique_id(mod->slave_addr, "relay", r)), "", true);
     }
 
     // DI binary sensors
     for (uint8_t d = 0; d < mod->model.DI_COUNT; d++)
     {
-        String uid = unique_id(mod->slave_addr, "di", d);
-        mqtt.publish(discovery_topic("binary_sensor", uid).c_str(), "", true);
-
+        mqtt.publish(discovery_topic("binary_sensor", unique_id(mod->slave_addr, "di", d)), "", true);
         // Click sensors
-        String click_uid = unique_id(mod->slave_addr, "click", d);
-        mqtt.publish(discovery_topic("sensor", click_uid).c_str(), "", true);
+        mqtt.publish(discovery_topic("sensor", unique_id(mod->slave_addr, "click", d)), "", true);
     }
 
     // Module status sensor
-    String status_uid = unique_id(mod->slave_addr, "status", 0);
-    String uid_avail = status_uid + "_avail";
-    mqtt.publish(discovery_topic("binary_sensor", uid_avail).c_str(), "", true);
-    mqtt.publish(discovery_topic("sensor", status_uid).c_str(), "", true);
+    static char uid_buf[64];
+    snprintf(uid_buf, sizeof(uid_buf), "%s_avail", unique_id(mod->slave_addr, "status", 0));
+    mqtt.publish(discovery_topic("binary_sensor", uid_buf), "", true);
+    mqtt.publish(discovery_topic("sensor", unique_id(mod->slave_addr, "status", 0)), "", true);
 
     // Slave address sensor
-    String addr_uid = unique_id(mod->slave_addr, "addr", 0);
-    mqtt.publish(discovery_topic("sensor", addr_uid).c_str(), "", true);
+    mqtt.publish(discovery_topic("sensor", unique_id(mod->slave_addr, "addr", 0)), "", true);
 
     LOG_I("[MQTT] Cleaned up discovery for module S%d\n", mod->slave_addr);
 }
@@ -411,13 +436,19 @@ void mqtt_cleanup_discovery(Slave_Module *mod)
 // Reused across all entities in mqtt_publish_discovery() to avoid repeated string allocs.
 static void set_device_block(JsonDocument &doc, Slave_Module *mod, const String &area)
 {
-    doc["device"]["identifiers"] = String(cfg.hostname) + "_ha_v2_" + String(mod->slave_addr);
+    static char ident[64];
+    snprintf(ident, sizeof(ident), "%s_ha_v2_%d", cfg.hostname, mod->slave_addr);
+    doc["device"]["identifiers"] = ident;
     doc["device"]["name"] = get_device_name(mod);
     doc["device"]["mf"] = get_manufacturer(mod);
     doc["device"]["mdl"] = mod->model.model_name;
     doc["device"]["sw"] = FIRMWARE_VERSION;
     if (mod->model.serial_number > 0)
-        doc["device"]["sn"] = String(mod->model.serial_number);
+    {
+        static char sn_buf[24];
+        snprintf(sn_buf, sizeof(sn_buf), "%lu", mod->model.serial_number);
+        doc["device"]["sn"] = sn_buf;
+    }
     if (area.length() > 0)
         doc["device"]["suggested_area"] = area;
 }
@@ -461,19 +492,21 @@ void mqtt_publish_discovery(Slave_Module *mod)
     // Common area for all entities of this module (computed once)
     String area = config_get_module_area(mod->slave_addr);
 
+    // Static buffers for object_id construction (avoid repeated String concatenation)
+    static char obj_id_buf[80];
+
     // Relay Switches
     for (uint8_t r = 0; r < mod->model.RELAY_COUNT; r++)
     {
         doc.clear();
-        String uid = unique_id(mod->slave_addr, "relay", r);
-        String obj_id = String(cfg.hostname) + "_s" + String(mod->slave_addr) + "_r" + String(r);
+        const char *uid = unique_id(mod->slave_addr, "relay", r);
+        snprintf(obj_id_buf, sizeof(obj_id_buf), "%s_s%d_r%d", cfg.hostname, mod->slave_addr, r);
 
-        // Note: do NOT set doc["platform"] = "mqtt" — HA auto-detects platform from topic path
         doc["name"] = get_relay_entity_name(mod, r);
         doc["unique_id"] = uid;
-        doc["object_id"] = obj_id;
-        doc["state_topic"] = topic_base(mod->slave_addr, "relay/" + String(r) + "/state");
-        doc["command_topic"] = topic_base(mod->slave_addr, "relay/" + String(r) + "/set");
+        doc["object_id"] = obj_id_buf;
+        doc["state_topic"] = topic_suffix(mod->slave_addr, "relay/", r, "state");
+        doc["command_topic"] = topic_suffix(mod->slave_addr, "relay/", r, "set");
         doc["payload_on"] = "ON";
         doc["payload_off"] = "OFF";
         doc["state_on"] = "ON";
@@ -483,21 +516,20 @@ void mqtt_publish_discovery(Slave_Module *mod)
         set_availability(doc);
         set_device_block(doc, mod, area);
 
-        discovery_publish(discovery_topic("switch", uid).c_str(), doc);
+        discovery_publish(discovery_topic("switch", uid), doc);
     }
 
     // DI Binary Sensors (state ON/OFF)
     for (uint8_t d = 0; d < mod->model.DI_COUNT; d++)
     {
         doc.clear();
-        String uid = unique_id(mod->slave_addr, "di", d);
-        String obj_id = String(cfg.hostname) + "_s" + String(mod->slave_addr) + "_di" + String(d);
+        const char *uid = unique_id(mod->slave_addr, "di", d);
+        snprintf(obj_id_buf, sizeof(obj_id_buf), "%s_s%d_di%d", cfg.hostname, mod->slave_addr, d);
 
-        // Note: do NOT set doc["platform"] = "mqtt" — HA auto-detects platform from topic path
         doc["name"] = get_di_entity_name(mod, d);
         doc["unique_id"] = uid;
-        doc["object_id"] = obj_id;
-        doc["state_topic"] = topic_base(mod->slave_addr, "di/" + String(d) + "/state");
+        doc["object_id"] = obj_id_buf;
+        doc["state_topic"] = topic_suffix(mod->slave_addr, "di/", d, "state");
         doc["payload_on"] = "ON";
         doc["payload_off"] = "OFF";
         doc["qos"] = MQTT_QOS;
@@ -507,63 +539,74 @@ void mqtt_publish_discovery(Slave_Module *mod)
         set_availability(doc);
         set_device_block(doc, mod, area);
 
-        discovery_publish(discovery_topic("binary_sensor", uid).c_str(), doc);
+        discovery_publish(discovery_topic("binary_sensor", uid), doc);
     }
 
     // DI Click Event Sensors (for automation triggers)
     for (uint8_t d = 0; d < mod->model.DI_COUNT; d++)
     {
         doc.clear();
-        String click_uid = unique_id(mod->slave_addr, "di_click", d);
+        const char *click_uid = unique_id(mod->slave_addr, "di_click", d);
 
         String di_custom = config_get_di_name(mod->slave_addr, d);
         String click_name = (di_custom.length() > 0) ? di_custom + " Kattintás"
                                                      : get_entity_name(mod, "DI " + String(d + 1) + " Kattintás");
 
-        // Note: do NOT set doc["platform"] = "mqtt" — HA auto-detects platform from topic path
+        snprintf(obj_id_buf, sizeof(obj_id_buf), "%s_s%d_di%d_click", cfg.hostname, mod->slave_addr, d);
+
         doc["name"] = click_name;
         doc["unique_id"] = click_uid;
-        doc["object_id"] = String(cfg.hostname) + "_s" + String(mod->slave_addr) + "_di" + String(d) + "_click";
-        doc["state_topic"] = topic_base(mod->slave_addr, "di/" + String(d) + "/click");
+        doc["object_id"] = obj_id_buf;
+        doc["state_topic"] = topic_suffix(mod->slave_addr, "di/", d, "click");
         doc["icon"] = "mdi:gesture-tap";
         doc["entity_category"] = "diagnostic";
         set_availability(doc);
         set_device_block(doc, mod, area);
 
-        discovery_publish(discovery_topic("sensor", click_uid).c_str(), doc);
+        discovery_publish(discovery_topic("sensor", click_uid), doc);
     }
 
     // Module Status Binary Sensor
-    doc.clear();
-    String uid_avail = unique_id(mod->slave_addr, "avail", 0);
-    // Note: do NOT set doc["platform"] = "mqtt" — HA auto-detects platform from topic path
-    doc["name"] = get_entity_name(mod, "Státusz");
-    doc["unique_id"] = uid_avail;
-    doc["entity_category"] = "diagnostic";
-    doc["state_topic"] = topic_base(mod->slave_addr, "status");
-    doc["payload_on"] = "online";
-    doc["payload_off"] = "offline";
-    set_device_block(doc, mod, area);
+    {
+        doc.clear();
+        static char uid_avail[64];
+        snprintf(uid_avail, sizeof(uid_avail), "%s_avail", unique_id(mod->slave_addr, "avail", 0));
 
-    discovery_publish(discovery_topic("binary_sensor", uid_avail).c_str(), doc);
+        doc["name"] = get_entity_name(mod, "Státusz");
+        doc["unique_id"] = uid_avail;
+        doc["entity_category"] = "diagnostic";
+        doc["state_topic"] = topic_base(mod->slave_addr, "status");
+        doc["payload_on"] = "online";
+        doc["payload_off"] = "offline";
+        set_device_block(doc, mod, area);
+
+        discovery_publish(discovery_topic("binary_sensor", uid_avail), doc);
+    }
 
     // Slave Address Sensor
-    doc.clear();
-    String uid_addr = unique_id(mod->slave_addr, "addr", 0);
-    // Note: do NOT set doc["platform"] = "mqtt" — HA auto-detects platform from topic path
-    doc["name"] = get_entity_name(mod, "Slave Cím");
-    doc["unique_id"] = uid_addr;
-    doc["object_id"] = String(cfg.hostname) + "_s" + String(mod->slave_addr) + "_addr";
-    doc["state_topic"] = topic_base(mod->slave_addr, "address");
-    doc["icon"] = "mdi:identifier";
-    doc["entity_category"] = "diagnostic";
-    set_availability(doc);
-    set_device_block(doc, mod, area);
+    {
+        doc.clear();
+        const char *uid_addr = unique_id(mod->slave_addr, "addr", 0);
+        snprintf(obj_id_buf, sizeof(obj_id_buf), "%s_s%d_addr", cfg.hostname, mod->slave_addr);
 
-    discovery_publish(discovery_topic("sensor", uid_addr).c_str(), doc);
+        doc["name"] = get_entity_name(mod, "Slave Cím");
+        doc["unique_id"] = uid_addr;
+        doc["object_id"] = obj_id_buf;
+        doc["state_topic"] = topic_base(mod->slave_addr, "address");
+        doc["icon"] = "mdi:identifier";
+        doc["entity_category"] = "diagnostic";
+        set_availability(doc);
+        set_device_block(doc, mod, area);
+
+        discovery_publish(discovery_topic("sensor", uid_addr), doc);
+    }
 
     // Publish slave address value
-    mqtt.publish(topic_base(mod->slave_addr, "address").c_str(), String(mod->slave_addr).c_str(), true);
+    {
+        static char addr_val[8];
+        snprintf(addr_val, sizeof(addr_val), "%d", mod->slave_addr);
+        mqtt.publish(topic_base(mod->slave_addr, "address"), addr_val, true);
+    }
 
     LOG_I("[MQTT] Discovery: S%d (%dR, %dDI, %dDI-Click, 1Addr)\n",
           mod->slave_addr,
@@ -576,11 +619,11 @@ void mqtt_publish_discovery(Slave_Module *mod)
     String mod_area = config_get_module_area(mod->slave_addr);
     if (mqtt_name.length() > 0)
     {
-        mqtt.publish(topic_base(mod->slave_addr, "name").c_str(), mqtt_name.c_str(), true);
+        mqtt.publish(topic_base(mod->slave_addr, "name"), mqtt_name.c_str(), true);
     }
     if (mod_area.length() > 0)
     {
-        mqtt.publish(topic_base(mod->slave_addr, "area").c_str(), mod_area.c_str(), true);
+        mqtt.publish(topic_base(mod->slave_addr, "area"), mod_area.c_str(), true);
     }
 
     // Publish all relay/DI names as retained sub-topics
@@ -589,7 +632,7 @@ void mqtt_publish_discovery(Slave_Module *mod)
         String rname = config_get_relay_name(mod->slave_addr, r);
         if (rname.length() > 0)
         {
-            mqtt.publish(topic_base(mod->slave_addr, "relay/" + String(r) + "/name").c_str(), rname.c_str(), true);
+            mqtt.publish(topic_suffix(mod->slave_addr, "relay/", r, "name"), rname.c_str(), true);
         }
     }
     for (uint8_t d = 0; d < mod->model.DI_COUNT; d++)
@@ -597,7 +640,7 @@ void mqtt_publish_discovery(Slave_Module *mod)
         String dname = config_get_di_name(mod->slave_addr, d);
         if (dname.length() > 0)
         {
-            mqtt.publish(topic_base(mod->slave_addr, "di/" + String(d) + "/name").c_str(), dname.c_str(), true);
+            mqtt.publish(topic_suffix(mod->slave_addr, "di/", d, "name"), dname.c_str(), true);
         }
     }
 }
@@ -605,15 +648,14 @@ void mqtt_publish_discovery(Slave_Module *mod)
 // ─── Publish Relay State ────────────────────────────────────────
 void mqtt_publish_relay_state(Slave_Module *mod, uint8_t relay_idx)
 {
-    String state_topic = topic_base(mod->slave_addr, "relay/" + String(relay_idx) + "/state");
-    mqtt.publish(state_topic.c_str(), mod->relays[relay_idx].state ? "ON" : "OFF", MQTT_RETAIN_STATE);
+    mqtt.publish(topic_suffix(mod->slave_addr, "relay/", relay_idx, "state"),
+                 mod->relays[relay_idx].state ? "ON" : "OFF", MQTT_RETAIN_STATE);
 
     // Publish relay name as retained sub-topic (for MQTT Explorer visibility)
     String name = config_get_relay_name(mod->slave_addr, relay_idx);
     if (name.length() > 0)
     {
-        String name_topic = topic_base(mod->slave_addr, "relay/" + String(relay_idx) + "/name");
-        mqtt.publish(name_topic.c_str(), name.c_str(), true);
+        mqtt.publish(topic_suffix(mod->slave_addr, "relay/", relay_idx, "name"), name.c_str(), true);
     }
 
     // Notify WebSocket clients
@@ -623,15 +665,14 @@ void mqtt_publish_relay_state(Slave_Module *mod, uint8_t relay_idx)
 // ─── Publish DI State ──────────────────────────────────────────
 void mqtt_publish_di_state(Slave_Module *mod, uint8_t di_idx, bool state)
 {
-    String state_topic = topic_base(mod->slave_addr, "di/" + String(di_idx) + "/state");
-    mqtt.publish(state_topic.c_str(), state ? "ON" : "OFF", MQTT_RETAIN_STATE);
+    mqtt.publish(topic_suffix(mod->slave_addr, "di/", di_idx, "state"),
+                 state ? "ON" : "OFF", MQTT_RETAIN_STATE);
 
     // Publish DI name as retained sub-topic (for MQTT Explorer visibility)
     String name = config_get_di_name(mod->slave_addr, di_idx);
     if (name.length() > 0)
     {
-        String name_topic = topic_base(mod->slave_addr, "di/" + String(di_idx) + "/name");
-        mqtt.publish(name_topic.c_str(), name.c_str(), true);
+        mqtt.publish(topic_suffix(mod->slave_addr, "di/", di_idx, "name"), name.c_str(), true);
     }
 
     // Notify WebSocket clients
@@ -641,9 +682,8 @@ void mqtt_publish_di_state(Slave_Module *mod, uint8_t di_idx, bool state)
 // ─── Publish Click Event (from callback) ────────────────────────
 void mqtt_publish_click_event(Slave_Module *mod, uint8_t di_idx, ClickType ct)
 {
-    String click_topic = topic_base(mod->slave_addr, "di/" + String(di_idx) + "/click");
     const char *click_str = click_type_str(ct);
-    mqtt.publish(click_topic.c_str(), click_str, false);
+    mqtt.publish(topic_suffix(mod->slave_addr, "di/", di_idx, "click"), click_str, false);
 
     LOG_D("[MQTT] Click: S%d DI%d: %s\n", mod->slave_addr, di_idx + 1, click_str);
 }
@@ -651,7 +691,7 @@ void mqtt_publish_click_event(Slave_Module *mod, uint8_t di_idx, ClickType ct)
 // ─── Publish Module Online Status ──────────────────────────────
 void mqtt_publish_module_online(Slave_Module *mod, bool online)
 {
-    mqtt.publish(topic_base(mod->slave_addr, "status").c_str(), online ? "online" : "offline", true);
+    mqtt.publish(topic_base(mod->slave_addr, "status"), online ? "online" : "offline", true);
 }
 
 // ─── Publish Modbus Stats ──────────────────────────────────────
@@ -672,11 +712,16 @@ void mqtt_publish_stats()
     }
     doc["uptime_s"] = (uint32_t)(millis() / 1000);
 
-    String payload;
-    serializeJson(doc, payload);
-
-    String stats_topic = String(cfg.mqtt_prefix) + "/ha_v2/stats";
-    mqtt.publish(stats_topic.c_str(), payload.c_str(), false);
+    size_t json_size = measureJson(doc) + 1;
+    char *buf = reinterpret_cast<char *>(psram_malloc(json_size));
+    if (buf)
+    {
+        serializeJson(doc, buf, json_size);
+        static char stats_topic[128];
+        snprintf(stats_topic, sizeof(stats_topic), "%s/ha_v2/stats", cfg.mqtt_prefix);
+        mqtt.publish(stats_topic, buf, false);
+        free(buf);
+    }
 }
 
 // ─── Click callback handler for MQTT ────────────────────────────
@@ -724,120 +769,90 @@ void mqtt_publish_bridge_discovery()
     if (!cfg.ha_discovery)
         return;
 
-    JsonDocument doc;
-    String bridge_id = String(cfg.hostname) + "_bridge";
-    String bridge_name = String(cfg.hostname) + " Bridge";
-    String avail_topic = topic_base(0, "status");
+    JsonDocument doc(PsramAllocator::instance());
+    static char bridge_id[64];
+    snprintf(bridge_id, sizeof(bridge_id), "%s_bridge", cfg.hostname);
+    const char *avail_topic = topic_base(0, "status");
 
     // Helper: common device block
     auto set_device = [&]() {
         doc["device"]["identifiers"] = bridge_id;
-        doc["device"]["name"] = bridge_name;
+        doc["device"]["name"] = String(cfg.hostname) + " Bridge";
         doc["device"]["mf"] = "Waveshare";
         doc["device"]["mdl"] = "ESP32-S3-ETH V1.0";
-        doc["device"]["sw"] = "Modbus-MQTT Bridge v2.0";
+        doc["device"]["sw"] = FIRMWARE_VERSION;
     };
 
-    // 1. WiFi Jel (RSSI)
-    {
+    // Helper: publish one bridge sensor discovery
+    auto publish_sensor = [&](const char *name, const char *uid_suffix,
+                              const char *state_topic, const char *device_class = nullptr,
+                              const char *unit = nullptr, const char *icon = nullptr) {
         doc.clear();
-        String uid = bridge_id + "_rssi";
-        // Note: do NOT set doc["platform"] = "mqtt" — HA auto-detects platform from topic path
-        doc["name"] = "WiFi Jel";
+        static char uid[96];
+        snprintf(uid, sizeof(uid), "%s_%s", bridge_id, uid_suffix);
+        doc["name"] = name;
         doc["unique_id"] = uid;
         doc["object_id"] = uid;
-        doc["state_topic"] = String(cfg.mqtt_prefix) + "/bridge/rssi";
-        doc["device_class"] = "signal_strength";
-        doc["unit_of_measurement"] = "dBm";
-        doc["icon"] = "mdi:wifi";
+        doc["state_topic"] = state_topic;
+        if (device_class)
+            doc["device_class"] = device_class;
+        if (unit)
+            doc["unit_of_measurement"] = unit;
+        if (icon)
+            doc["icon"] = icon;
         doc["availability_topic"] = avail_topic;
         doc["payload_available"] = "online";
         doc["payload_not_available"] = "offline";
         set_device();
-        String payload;
-        serializeJson(doc, payload);
-        mqtt.publish(discovery_topic("sensor", uid).c_str(), payload.c_str(), true);
-    }
+        discovery_publish(discovery_topic("sensor", uid), doc);
+    };
+
+    static char topic_buf[128];
+
+    // 1. WiFi Jel (RSSI)
+    snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/rssi", cfg.mqtt_prefix);
+    publish_sensor("WiFi Jel", "rssi", topic_buf, "signal_strength", "dBm", "mdi:wifi");
 
     // 2. Szabad Memória (Heap)
-    {
-        doc.clear();
-        String uid = bridge_id + "_heap";
-        // Note: do NOT set doc["platform"] = "mqtt" — HA auto-detects platform from topic path
-        doc["name"] = "Szabad Memória";
-        doc["unique_id"] = uid;
-        doc["object_id"] = uid;
-        doc["state_topic"] = String(cfg.mqtt_prefix) + "/bridge/heap";
-        doc["unit_of_measurement"] = "B";
-        doc["icon"] = "mdi:memory";
-        doc["availability_topic"] = avail_topic;
-        doc["payload_available"] = "online";
-        doc["payload_not_available"] = "offline";
-        set_device();
-        String payload;
-        serializeJson(doc, payload);
-        mqtt.publish(discovery_topic("sensor", uid).c_str(), payload.c_str(), true);
-    }
+    snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/heap", cfg.mqtt_prefix);
+    publish_sensor("Szabad Memória", "heap", topic_buf, nullptr, "B", "mdi:memory");
 
     // 3. Uptime
-    {
-        doc.clear();
-        String uid = bridge_id + "_uptime";
-        // Note: do NOT set doc["platform"] = "mqtt" — HA auto-detects platform from topic path
-        doc["name"] = "Uptime";
-        doc["unique_id"] = uid;
-        doc["object_id"] = uid;
-        doc["state_topic"] = String(cfg.mqtt_prefix) + "/bridge/uptime";
-        doc["unit_of_measurement"] = "s";
-        doc["icon"] = "mdi:clock";
-        doc["availability_topic"] = avail_topic;
-        doc["payload_available"] = "online";
-        doc["payload_not_available"] = "offline";
-        set_device();
-        String payload;
-        serializeJson(doc, payload);
-        mqtt.publish(discovery_topic("sensor", uid).c_str(), payload.c_str(), true);
-    }
+    snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/uptime", cfg.mqtt_prefix);
+    publish_sensor("Uptime", "uptime", topic_buf, nullptr, "s", "mdi:clock");
 
     // 4. Hálózat (Interface)
-    {
-        doc.clear();
-        String uid = bridge_id + "_if";
-        // Note: do NOT set doc["platform"] = "mqtt" — HA auto-detects platform from topic path
-        doc["name"] = "Hálózat";
-        doc["unique_id"] = uid;
-        doc["object_id"] = uid;
-        doc["state_topic"] = String(cfg.mqtt_prefix) + "/bridge/interface";
-        doc["icon"] = "mdi:lan";
-        doc["availability_topic"] = avail_topic;
-        doc["payload_available"] = "online";
-        doc["payload_not_available"] = "offline";
-        set_device();
-        String payload;
-        serializeJson(doc, payload);
-        mqtt.publish(discovery_topic("sensor", uid).c_str(), payload.c_str(), true);
-    }
+    snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/interface", cfg.mqtt_prefix);
+    publish_sensor("Hálózat", "if", topic_buf, nullptr, nullptr, "mdi:lan");
 
     // 5. IP Cím
+    snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/ip", cfg.mqtt_prefix);
+    publish_sensor("IP Cím", "ip", topic_buf, nullptr, nullptr, "mdi:ip-network");
+
+    // 6. PSRAM Free
+    snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/psram_free", cfg.mqtt_prefix);
+    publish_sensor("PSRAM Szabad", "psram_free", topic_buf, nullptr, "B", "mdi:memory");
+
+    // 7. Firmware Version (non-numeric, use as diagnostic)
+    snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/fw_version", cfg.mqtt_prefix);
     {
         doc.clear();
-        String uid = bridge_id + "_ip";
-        // Note: do NOT set doc["platform"] = "mqtt" — HA auto-detects platform from topic path
-        doc["name"] = "IP Cím";
+        static char uid[96];
+        snprintf(uid, sizeof(uid), "%s_fw", bridge_id);
+        doc["name"] = "Firmware";
         doc["unique_id"] = uid;
         doc["object_id"] = uid;
-        doc["state_topic"] = String(cfg.mqtt_prefix) + "/bridge/ip";
-        doc["icon"] = "mdi:ip-network";
+        doc["state_topic"] = topic_buf;
+        doc["icon"] = "mdi:chip";
+        doc["entity_category"] = "diagnostic";
         doc["availability_topic"] = avail_topic;
         doc["payload_available"] = "online";
         doc["payload_not_available"] = "offline";
         set_device();
-        String payload;
-        serializeJson(doc, payload);
-        mqtt.publish(discovery_topic("sensor", uid).c_str(), payload.c_str(), true);
+        discovery_publish(discovery_topic("sensor", uid), doc);
     }
 
-    LOG_ILN("[MQTT] Bridge system discovery published (5 sensors)");
+    LOG_ILN("[MQTT] Bridge system discovery published (7 sensors)");
 }
 
 // ─── Bridge System State Publishing ────────────────────────────
@@ -846,28 +861,43 @@ void mqtt_publish_bridge_state()
     if (!mqtt.connected())
         return;
 
-    String prefix = String(cfg.mqtt_prefix) + "/bridge/";
+    static char topic_buf[128];
 
     // RSSI — only valid when WiFi connected
+    snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/rssi", cfg.mqtt_prefix);
     if (WiFi.status() == WL_CONNECTED)
     {
-        mqtt.publish((prefix + "rssi").c_str(), String(WiFi.RSSI()).c_str(), false);
+        static char rssi_val[12];
+        snprintf(rssi_val, sizeof(rssi_val), "%d", WiFi.RSSI());
+        mqtt.publish(topic_buf, rssi_val, false);
     }
     else
     {
-        mqtt.publish((prefix + "rssi").c_str(), "unavailable", false);
+        mqtt.publish(topic_buf, "unavailable", false);
     }
 
     // Free heap
-    mqtt.publish((prefix + "heap").c_str(), String(ESP.getFreeHeap()).c_str(), false);
+    snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/heap", cfg.mqtt_prefix);
+    {
+        static char heap_val[16];
+        snprintf(heap_val, sizeof(heap_val), "%u", ESP.getFreeHeap());
+        mqtt.publish(topic_buf, heap_val, false);
+    }
 
     // Firmware version
-    mqtt.publish((prefix + "fw_version").c_str(), FIRMWARE_VERSION, true);
+    snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/fw_version", cfg.mqtt_prefix);
+    mqtt.publish(topic_buf, FIRMWARE_VERSION, true);
 
     // Uptime in seconds
-    mqtt.publish((prefix + "uptime").c_str(), String(millis() / 1000).c_str(), false);
+    snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/uptime", cfg.mqtt_prefix);
+    {
+        static char uptime_val[16];
+        snprintf(uptime_val, sizeof(uptime_val), "%lu", millis() / 1000);
+        mqtt.publish(topic_buf, uptime_val, false);
+    }
 
     // Active interface
+    snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/interface", cfg.mqtt_prefix);
     const char *if_name;
     switch (cfg.active_if)
     {
@@ -881,16 +911,25 @@ void mqtt_publish_bridge_state()
         if_name = "NONE";
         break;
     }
-    mqtt.publish((prefix + "interface").c_str(), if_name, false);
+    mqtt.publish(topic_buf, if_name, false);
 
     // IP address
+    snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/ip", cfg.mqtt_prefix);
     if (net_connected)
     {
-        mqtt.publish((prefix + "ip").c_str(), active_ip.c_str(), false);
+        mqtt.publish(topic_buf, active_ip.c_str(), false);
     }
     else
     {
-        mqtt.publish((prefix + "ip").c_str(), "unavailable", false);
+        mqtt.publish(topic_buf, "unavailable", false);
+    }
+
+    // PSRAM free
+    snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/psram_free", cfg.mqtt_prefix);
+    {
+        static char psram_val[16];
+        snprintf(psram_val, sizeof(psram_val), "%u", psram_free());
+        mqtt.publish(topic_buf, psram_val, false);
     }
 
     // Notify watchdog that MQTT is alive
