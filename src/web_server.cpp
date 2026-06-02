@@ -328,6 +328,20 @@ static void handleDI()
     mqtt_publish_di_state(mod, di, state);
     LOG_I("[WEB] Virtual S%d DI%d → %s\n", addr, di + 1, state ? "ON" : "OFF");
 
+    // ── DI→Relay local mapping for virtual module ──
+    uint8_t mapped = mod->di_relay_map[di];
+    if (mapped != 0xFF && mapped < HA_V2_RELAY_COUNT)
+    {
+        bool new_relay = !mod->relays[mapped].state;
+        mod->relays[mapped].state = new_relay;
+        mod->relays[mapped].published = false;
+        // Virtual module: no Modbus write, just update state + MQTT publish
+        mqtt_publish_relay_state(mod, mapped);
+        LOG_I("[DI→RELAY] S%d DI%d→R%d: %s (virtual)\n",
+              mod->slave_addr, di + 1, mapped + 1,
+              new_relay ? "ON" : "OFF");
+    }
+
     String resp = "{\"ok\":true,\"addr\":" + String(addr) + ",\"di\":" + String(di) +
                   ",\"state\":" + String(state ? 1 : 0) + "}";
     WS->send(200, "application/json", resp);
