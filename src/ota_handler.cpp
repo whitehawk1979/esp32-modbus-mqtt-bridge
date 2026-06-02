@@ -299,6 +299,7 @@ void handleOtaFromURL()
 
     while (totalWritten < (size_t)contentLength)
     {
+        esp_task_wdt_reset(); // Feed WDT during download+write
         size_t available = stream->available();
         if (available)
         {
@@ -336,8 +337,9 @@ void handleOtaFromURL()
     if (Update.end(true))
     {
         LOG_I("[OTA-URL] SUCCESS! Firmware updated (%d bytes). Rebooting...\n", totalWritten);
-        web.send(200, "application/json",
-                 "{\"status\":\"ok\",\"bytes\":" + String(totalWritten) + ",\"rebooting\":true}");
+        char okBuf[80];
+        snprintf(okBuf, sizeof(okBuf), "{\"status\":\"ok\",\"bytes\":%d,\"rebooting\":true}", totalWritten);
+        web.send(200, "application/json", okBuf);
         delay(3000);
         ESP.restart();
     }

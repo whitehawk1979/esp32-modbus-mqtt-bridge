@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""OTA crawl upload for ESP32-S3 Modbus-MQTT Bridge — throttled Digest-auth POST v2"""
+"""WiFi POST OTA upload — single-attempt Digest auth, clean flow"""
 import hashlib, time, re, sys, os, socket
 
-ESP_IP = os.environ.get("ESP_IP", "192.168.1.45")
+ESP_IP = "192.168.1.45"
 PORT = 80
 USER = "admin"
 PASS = "admin"
 CHUNK = 64
-DELAY = 0.012  # ~5KB/s — WDT fix (v2.6.1) allows faster
+DELAY = 0.010  # ~6KB/s — WDT fix allows this
 
 FW = sys.argv[1] if len(sys.argv) > 1 else "/config/.hermes/projects/modbus-mqtt-ha/.pio/build/esp32-s3-prod/firmware.bin"
 
@@ -22,7 +22,7 @@ def parse_www_auth(text):
 
 def build_digest(user, password, method, uri, params):
     nc = '00000001'
-    cnonce = 'tor260ota'
+    cnonce = 'tor265wifi'
     ha1 = hashlib.md5(f'{user}:{params["realm"]}:{password}'.encode()).hexdigest()
     ha2 = hashlib.md5(f'{method}:{uri}'.encode()).hexdigest()
     qop = params.get('qop', 'auth')
@@ -34,8 +34,8 @@ def build_digest(user, password, method, uri, params):
         hdr += f', opaque="{params["opaque"]}"'
     return hdr
 
-def get_nonce():
-    """Get fresh Digest nonce from ESP32"""
+def get_nonce_once():
+    """Single nonce request — no retry, no 429 risk"""
     s = socket.socket()
     s.settimeout(10)
     s.connect((ESP_IP, PORT))
@@ -60,47 +60,26 @@ with open(FW, 'rb') as f:
     fw = f.read()
 print(f'FW: {len(fw)} bytes ({len(fw)//1024}KB)', flush=True)
 
-# Step 1: Get nonce
-print('Step 1: Getting nonce...', flush=True)
-dp = get_nonce()
+# Single nonce request
+print('Getting nonce (single attempt)...', flush=True)
+dp = get_nonce_once()
 if dp is None:
-    print('429 rate limited or no challenge! Waiting 60s...', flush=True)
-    time.sleep(60)
-    dp = get_nonce()
-    if dp is None:
-        print('Still blocked! Aborting.', flush=True)
-        sys.exit(1)
-print(f'Nonce: {dp["nonce"][:12]}...', flush=True)
+    print('429 or no challenge — aborting. Wait 60s and retry.', flush=True)
+    sys.exit(1)
+print(f'Nonce: {dp["nonce"][:16]}...', flush=True)
 
-# Step 2: Build multipart body
-boundary = '----TOR260OTA'
+# Build multipart body immediately
+boundary = '----TOR265WIFI'
 body = (
     f'--{boundary}\r\n'
     f'Content-Disposition: form-data; name="firmware"; filename="firmware.bin"\r\n'
     f'Content-Type: application/octet-stream\r\n\r\n'
 ).encode() + fw + f'\r\n--{boundary}--\r\n'.encode()
 
-# Small delay before fresh nonce
-time.sleep(3)
-
-# Get fresh nonce right before upload
-print('Getting fresh nonce for upload...', flush=True)
-dp2 = get_nonce()
-if dp2 is not None:
-    dp = dp2
-    print(f'Fresh nonce: {dp["nonce"][:12]}...', flush=True)
-else:
-    print('429 on fresh nonce, using earlier nonce...', flush=True)
-    time.sleep(30)
-    dp2 = get_nonce()
-    if dp2 is not None:
-        dp = dp2
-        print(f'Retry nonce: {dp["nonce"][:12]}...', flush=True)
-
 auth = build_digest(USER, PASS, 'POST', '/otaupload', dp)
 
-# Step 3: Send headers + body with throttle
-print(f'Uploading {len(body)//1024}KB at ~{CHUNK/DELAY/1024:.0f}KB/s...', flush=True)
+# Send immediately — no delay (nonce is fresh)
+print(f'Uploading {len(body)//1024}KB at ~{CHUNK/DELAY/1024:.0f}KB/s via WiFi POST...', flush=True)
 s = socket.socket()
 s.settimeout(900)
 s.connect((ESP_IP, PORT))
@@ -134,9 +113,9 @@ for i in range(0, len(body), CHUNK):
         last_log = sent
 
 elapsed = time.time() - t0
-print(f'Sent {sent}/{len(body)}B in {elapsed:.0f}s', flush=True)
+print(f'Sent ALL {sent}/{len(body)}B in {elapsed:.0f}s', flush=True)
 
-# Step 4: Read response (ESP32 may reboot without sending HTTP response)
+# Read response (ESP32 may reboot without HTTP response)
 print('Waiting for ESP32 response (15s)...', flush=True)
 s.settimeout(15)
 resp = b''
@@ -152,14 +131,12 @@ rt = resp.decode(errors='replace')
 status = rt.split('\r\n')[0] if rt else 'empty'
 print(f'HTTP: {status}', flush=True)
 if '200' in status:
-    print('OTA UPLOAD SUCCESS!', flush=True)
+    print('WiFi POST OTA SUCCESS!', flush=True)
 elif '500' in status:
     print('OTA write failed!', flush=True)
 elif not resp or 'empty' in status:
-    print('No HTTP response (ESP32 likely rebooting after flash write)', flush=True)
+    print('No HTTP response — ESP32 likely rebooting after WDT-safe flash!', flush=True)
 else:
     body_txt = rt.split('\r\n\r\n', 1)
     if len(body_txt) > 1:
         print(f'Body: {body_txt[1][:300]}', flush=True)
-    else:
-        print('No response body (ESP32 rebooting?)', flush=True)

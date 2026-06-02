@@ -17,6 +17,7 @@
 #include <WebServer.h>
 #include <algorithm>
 #include "web_templates.h"
+#include "web_adapter.h"
 #ifdef USE_W5500
 #include <SPI.h>
 #include <Ethernet.h>
@@ -33,6 +34,15 @@ void handleOtaUpload();
 void handleOtaFromURL();
 
 WebServer web(80);
+
+// ─── Web Adapter — allows same handler functions on WiFi and LAN ──
+WiFiWebAdapter wifiAdapter(web);
+WebInterface *WS = &wifiAdapter; // default: WiFi
+
+#ifdef USE_W5500
+EthWebServer ethWeb(80);
+EthWebAdapter lanAdapter(ethWeb);
+#endif
 
 // ─── HTML Escape — XSS Prevention ──────────────────────────────
 // Escapes user-controlled strings before embedding in HTML attributes
@@ -79,7 +89,7 @@ bool web_auth_ok()
     uint32_t now = millis();
     if (auth_lockout_until > 0 && now < auth_lockout_until)
     {
-        web.send(429, "text/plain", "Too Many Attempts — try again later");
+        WS->send(429, "text/plain", "Too Many Attempts — try again later");
         return false;
     }
     // Reset counter if lockout expired
@@ -94,10 +104,10 @@ bool web_auth_ok()
         auth_fail_count = 0;
     }
 
-    if (!web.authenticate("admin", cfg.web_pass))
+    if (!WS->authenticate("admin", cfg.web_pass))
     {
         // ── Fallback: query-param auth for non-browser clients (curl, scripts) ──
-        if (web.hasArg("auth") && web.arg("auth") == String(cfg.web_pass))
+        if (WS->hasArg("auth") && WS->arg("auth") == String(cfg.web_pass))
         {
             // Query-param auth OK — skip Digest challenge
             auth_fail_count = 0;
@@ -112,15 +122,15 @@ bool web_auth_ok()
         {
             auth_lockout_until = millis() + AUTH_LOCKOUT_MS;
             LOG_E("[AUTH] ⚠ LOCKOUT: %u failed attempts, blocked for %us\n", auth_fail_count, AUTH_LOCKOUT_MS / 1000);
-            web.send(429, "text/plain", "Too Many Attempts — locked for 30s");
+            WS->send(429, "text/plain", "Too Many Attempts — locked for 30s");
             return false;
         }
 
         LOG_E("[AUTH] Failed attempt %u/%u from %s\n",
               auth_fail_count,
               AUTH_MAX_ATTEMPTS,
-              web.client().remoteIP().toString().c_str());
-        web.requestAuthentication(DIGEST_AUTH, "ModbusMQTT");
+              WS->clientIP().toString().c_str());
+        WS->requestAuthentication();
         return false;
     }
 
@@ -153,7 +163,7 @@ static uint8_t api_rate_next = 0; // round-robin index
 static bool api_rate_ok()
 {
     uint32_t now = millis();
-    uint32_t client_ip = web.client().remoteIP();
+    uint32_t client_ip = WS->clientIP();
     
     // Find existing entry or free slot
     int8_t slot = -1;
@@ -188,10 +198,10 @@ static bool api_rate_ok()
     if (api_rate_table[slot].count > API_RATE_MAX)
     {
         LOG_I("[RATE] IP %s rate limited (%u req/%us)\n",
-              web.client().remoteIP().toString().c_str(),
+              WS->clientIP().toString().c_str(),
               api_rate_table[slot].count,
               API_RATE_WINDOW / 1000);
-        web.send(429, "application/json", "{\"error\":\"rate_limited\",\"retry_after\":60}");
+        WS->send(429, "application/json", "{\"error\":\"rate_limited\",\"retry_after\":60}");
         return false;
     }
     
@@ -211,14 +221,14 @@ static void handleRelay()
 {
     if (!web_auth_ok())
         return;
-    if (!web.hasArg("addr") || !web.hasArg("relay") || !web.hasArg("state"))
+    if (!WS->hasArg("addr") || !WS->hasArg("relay") || !WS->hasArg("state"))
     {
-        web.send(400, "application/json", "{\"ok\":false,\"error\":\"missing params\"}");
+        WS->send(400, "application/json", "{\"ok\":false,\"error\":\"missing params\"}");
         return;
     }
-    uint8_t addr = (uint8_t)web.arg("addr").toInt();
-    uint8_t relay = (uint8_t)web.arg("relay").toInt();
-    bool state = web.arg("state").toInt() != 0;
+    uint8_t addr = (uint8_t)WS->arg("addr").toInt();
+    uint8_t relay = (uint8_t)WS->arg("relay").toInt();
+    bool state = WS->arg("state").toInt() != 0;
 
     // Find module
     Slave_Module *mod = nullptr;
@@ -232,7 +242,7 @@ static void handleRelay()
     }
     if (!mod)
     {
-        web.send(404, "application/json", "{\"ok\":false,\"error\":\"module not found\"}");
+        WS->send(404, "application/json", "{\"ok\":false,\"error\":\"module not found\"}");
         return;
     }
 
@@ -248,7 +258,7 @@ static void handleRelay()
     }
     else if (!mod->online)
     {
-        web.send(409, "application/json", "{\"ok\":false,\"error\":\"module offline\"}");
+        WS->send(409, "application/json", "{\"ok\":false,\"error\":\"module offline\"}");
         return;
     }
     else
@@ -270,11 +280,11 @@ static void handleRelay()
     {
         String resp = "{\"ok\":true,\"addr\":" + String(addr) + ",\"relay\":" + String(relay) +
                       ",\"state\":" + String(state ? 1 : 0) + "}";
-        web.send(200, "application/json", resp);
+        WS->send(200, "application/json", resp);
     }
     else
     {
-        web.send(500, "application/json", "{\"ok\":false,\"error\":\"modbus write failed\"}");
+        WS->send(500, "application/json", "{\"ok\":false,\"error\":\"modbus write failed\"}");
     }
 }
 
@@ -284,14 +294,14 @@ static void handleDI()
 {
     if (!web_auth_ok())
         return;
-    if (!web.hasArg("addr") || !web.hasArg("di") || !web.hasArg("state"))
+    if (!WS->hasArg("addr") || !WS->hasArg("di") || !WS->hasArg("state"))
     {
-        web.send(400, "application/json", "{\"ok\":false,\"error\":\"missing params\"}");
+        WS->send(400, "application/json", "{\"ok\":false,\"error\":\"missing params\"}");
         return;
     }
-    uint8_t addr = (uint8_t)web.arg("addr").toInt();
-    uint8_t di = (uint8_t)web.arg("di").toInt();
-    bool state = web.arg("state").toInt() != 0;
+    uint8_t addr = (uint8_t)WS->arg("addr").toInt();
+    uint8_t di = (uint8_t)WS->arg("di").toInt();
+    bool state = WS->arg("state").toInt() != 0;
 
     Slave_Module *mod = nullptr;
     for (uint16_t i = 0; i < module_count; i++)
@@ -304,12 +314,12 @@ static void handleDI()
     }
     if (!mod)
     {
-        web.send(404, "application/json", "{\"ok\":false,\"error\":\"module not found\"}");
+        WS->send(404, "application/json", "{\"ok\":false,\"error\":\"module not found\"}");
         return;
     }
     if (!mod->is_virtual)
     {
-        web.send(400, "application/json", "{\"ok\":false,\"error\":\"DI toggle only for virtual module\"}");
+        WS->send(400, "application/json", "{\"ok\":false,\"error\":\"DI toggle only for virtual module\"}");
         return;
     }
 
@@ -320,7 +330,7 @@ static void handleDI()
 
     String resp = "{\"ok\":true,\"addr\":" + String(addr) + ",\"di\":" + String(di) +
                   ",\"state\":" + String(state ? 1 : 0) + "}";
-    web.send(200, "application/json", resp);
+    WS->send(200, "application/json", resp);
 }
 
 // ─── Helpers ───────────────────────────────────────────────────
@@ -479,7 +489,7 @@ static void handleStatus()
     html = pageStart(F("Modbus-MQTT Bridge — Státusz"), CSS_STATUS) + pageStyleEnd();
 
     html += "<h1>&#9889; " + htmlEscape(cfg.hostname) + "</h1>";
-    html += navHtml(PG_STATUS);
+    html += navHtml(PG_STATUS, WS->hasArg("auth") ? ("?auth=" + WS->arg("auth")) : "");
 
     // Network — Dual stack display (both interfaces always visible)
     html += "<h2>&#128279; Hálózat</h2><div class=\"card\">";
@@ -695,7 +705,7 @@ static void handleStatus()
 
     html += pageFoot();
 
-    web.send(200, "text/html", html);
+    WS->send(200, "text/html", html);
 }
 
 // ─── CONFIG PAGE ───────────────────────────────────────────────
@@ -709,7 +719,7 @@ static void handleConfig()
     html = pageStart(F("Modbus-MQTT Bridge — Beállítások"), CSS_FORMS) + pageStyleEnd();
 
     html += F("<h1>&#9889; Beállítások</h1>");
-    html += navHtml(PG_CONFIG);
+    html += navHtml(PG_CONFIG, WS->hasArg("auth") ? ("?auth=" + WS->arg("auth")) : "");
     html += F("<div class=\"pri\"><b>&#128279; LAN elsődleges — WiFi automatikus fallback</b><br><span class=\"note\">LAN mindig preferált. Ha leáll, WiFi átveszi. Ha LAN visszajön, automatikusan visszaáll.</span></div>"
               "<form action=\"/save\" method=\"POST\">");
 
@@ -894,7 +904,7 @@ function toggleTcp(){document.getElementById('tcpSection').style.display=documen
 function toggleGeneric(){var p=document.getElementById('mbprof').value;document.getElementById('genericSection').style.display=(p==='2')?'block':'none'}
 </script></body></html>)rawliteral";
 
-    web.send(200, "text/html", html);
+    WS->send(200, "text/html", html);
 }
 
 // ─── SAVE Handler ──────────────────────────────────────────────
@@ -908,89 +918,89 @@ static void handleSave()
     // Only write keys that are present in the POST body (partial update).
     // Missing keys are NOT overwritten — prevents D4 bug (empty field → NVRAM zeroed)
 
-    if (web.hasArg("ssid"))
-        nv.putString(NV_KEY_WIFI_SSID, web.arg("ssid"));
-    if (web.hasArg("wpass"))
-        nv.putString(NV_KEY_WIFI_PASS, web.arg("wpass"));
-    if (web.hasArg("apn"))
-        nv.putString(NV_KEY_AP_NAME, web.arg("apn"));
-    if (web.hasArg("appass"))
-        nv.putString(NV_KEY_AP_PASS, web.arg("appass"));
-    if (web.hasArg("wifimode"))
-        nv.putUChar(NV_KEY_WIFI_MODE, web.arg("wifimode").toInt());
-    if (web.hasArg("wdhcp"))
-        nv.putBool(NV_KEY_WIFI_DHCP, web.arg("wdhcp") == "1");
-    if (web.hasArg("wip"))
-        nv.putString(NV_KEY_WIFI_IP, web.arg("wip"));
-    if (web.hasArg("wgw"))
-        nv.putString(NV_KEY_WIFI_GW, web.arg("wgw"));
-    if (web.hasArg("wmask"))
-        nv.putString(NV_KEY_WIFI_MASK, web.arg("wmask"));
-    if (web.hasArg("wdns"))
-        nv.putString(NV_KEY_WIFI_DNS, web.arg("wdns"));
+    if (WS->hasArg("ssid"))
+        nv.putString(NV_KEY_WIFI_SSID, WS->arg("ssid"));
+    if (WS->hasArg("wpass"))
+        nv.putString(NV_KEY_WIFI_PASS, WS->arg("wpass"));
+    if (WS->hasArg("apn"))
+        nv.putString(NV_KEY_AP_NAME, WS->arg("apn"));
+    if (WS->hasArg("appass"))
+        nv.putString(NV_KEY_AP_PASS, WS->arg("appass"));
+    if (WS->hasArg("wifimode"))
+        nv.putUChar(NV_KEY_WIFI_MODE, WS->arg("wifimode").toInt());
+    if (WS->hasArg("wdhcp"))
+        nv.putBool(NV_KEY_WIFI_DHCP, WS->arg("wdhcp") == "1");
+    if (WS->hasArg("wip"))
+        nv.putString(NV_KEY_WIFI_IP, WS->arg("wip"));
+    if (WS->hasArg("wgw"))
+        nv.putString(NV_KEY_WIFI_GW, WS->arg("wgw"));
+    if (WS->hasArg("wmask"))
+        nv.putString(NV_KEY_WIFI_MASK, WS->arg("wmask"));
+    if (WS->hasArg("wdns"))
+        nv.putString(NV_KEY_WIFI_DNS, WS->arg("wdns"));
 
-    if (web.hasArg("lanen"))
-        nv.putBool(NV_KEY_ETH_EN, web.arg("lanen") == "1");
-    if (web.hasArg("landhcp"))
-        nv.putBool(NV_KEY_ETH_DHCP, web.arg("landhcp") == "1");
-    if (web.hasArg("lanip"))
-        nv.putString(NV_KEY_ETH_IP, web.arg("lanip"));
-    if (web.hasArg("langw"))
-        nv.putString(NV_KEY_ETH_GW, web.arg("langw"));
-    if (web.hasArg("lanmask"))
-        nv.putString(NV_KEY_ETH_MASK, web.arg("lanmask"));
-    if (web.hasArg("landns"))
-        nv.putString(NV_KEY_ETH_DNS, web.arg("landns"));
-    if (web.hasArg("lantype"))
-        nv.putUChar(NV_KEY_ETH_TYPE, web.arg("lantype").toInt());
+    if (WS->hasArg("lanen"))
+        nv.putBool(NV_KEY_ETH_EN, WS->arg("lanen") == "1");
+    if (WS->hasArg("landhcp"))
+        nv.putBool(NV_KEY_ETH_DHCP, WS->arg("landhcp") == "1");
+    if (WS->hasArg("lanip"))
+        nv.putString(NV_KEY_ETH_IP, WS->arg("lanip"));
+    if (WS->hasArg("langw"))
+        nv.putString(NV_KEY_ETH_GW, WS->arg("langw"));
+    if (WS->hasArg("lanmask"))
+        nv.putString(NV_KEY_ETH_MASK, WS->arg("lanmask"));
+    if (WS->hasArg("landns"))
+        nv.putString(NV_KEY_ETH_DNS, WS->arg("landns"));
+    if (WS->hasArg("lantype"))
+        nv.putUChar(NV_KEY_ETH_TYPE, WS->arg("lantype").toInt());
 
-    if (web.hasArg("mhost"))
-        nv.putString(NV_KEY_MQTT_HOST, web.arg("mhost"));
-    if (web.hasArg("mport"))
-        nv.putUShort(NV_KEY_MQTT_PORT, web.arg("mport").toInt());
-    if (web.hasArg("muser"))
-        nv.putString(NV_KEY_MQTT_USER, web.arg("muser"));
-    if (web.hasArg("mpass"))
-        nv.putString(NV_KEY_MQTT_PASS, web.arg("mpass"));
-    if (web.hasArg("mpfx"))
-        nv.putString(NV_KEY_MQTT_PREFIX, web.arg("mpfx"));
-    if (web.hasArg("mtls"))
-        nv.putBool(NV_KEY_MQTT_TLS, web.arg("mtls") == "1");
+    if (WS->hasArg("mhost"))
+        nv.putString(NV_KEY_MQTT_HOST, WS->arg("mhost"));
+    if (WS->hasArg("mport"))
+        nv.putUShort(NV_KEY_MQTT_PORT, WS->arg("mport").toInt());
+    if (WS->hasArg("muser"))
+        nv.putString(NV_KEY_MQTT_USER, WS->arg("muser"));
+    if (WS->hasArg("mpass"))
+        nv.putString(NV_KEY_MQTT_PASS, WS->arg("mpass"));
+    if (WS->hasArg("mpfx"))
+        nv.putString(NV_KEY_MQTT_PREFIX, WS->arg("mpfx"));
+    if (WS->hasArg("mtls"))
+        nv.putBool(NV_KEY_MQTT_TLS, WS->arg("mtls") == "1");
 
-    if (web.hasArg("hadisc"))
-        nv.putBool(NV_KEY_HA_DISC, web.arg("hadisc") == "1");
+    if (WS->hasArg("hadisc"))
+        nv.putBool(NV_KEY_HA_DISC, WS->arg("hadisc") == "1");
 
-    if (web.hasArg("mbaud"))
-        nv.putUInt(NV_KEY_MB_BAUD, web.arg("mbaud").toInt());
-    if (web.hasArg("mstart"))
-        nv.putUChar(NV_KEY_MB_START, web.arg("mstart").toInt());
-    if (web.hasArg("mend"))
-        nv.putUChar(NV_KEY_MB_END, web.arg("mend").toInt());
-    if (web.hasArg("mpar"))
-        nv.putUChar(NV_KEY_MB_PARITY, web.arg("mpar").toInt());
-    if (web.hasArg("mbprof"))
-        nv.putUChar(NV_KEY_MB_PROFILE, web.arg("mbprof").toInt());
-    if (web.hasArg("mbcoil"))
-        nv.putUShort(NV_KEY_MB_REG_COIL, web.arg("mbcoil").toInt());
-    if (web.hasArg("mbdi"))
-        nv.putUShort(NV_KEY_MB_REG_DI, web.arg("mbdi").toInt());
-    if (web.hasArg("mbpoll"))
-        nv.putUShort(NV_KEY_MB_POLL_MS, web.arg("mbpoll").toInt());
-    if (web.hasArg("vmod"))
-        nv.putBool(NV_KEY_VIRTUAL_MOD, web.arg("vmod") == "1");
+    if (WS->hasArg("mbaud"))
+        nv.putUInt(NV_KEY_MB_BAUD, WS->arg("mbaud").toInt());
+    if (WS->hasArg("mstart"))
+        nv.putUChar(NV_KEY_MB_START, WS->arg("mstart").toInt());
+    if (WS->hasArg("mend"))
+        nv.putUChar(NV_KEY_MB_END, WS->arg("mend").toInt());
+    if (WS->hasArg("mpar"))
+        nv.putUChar(NV_KEY_MB_PARITY, WS->arg("mpar").toInt());
+    if (WS->hasArg("mbprof"))
+        nv.putUChar(NV_KEY_MB_PROFILE, WS->arg("mbprof").toInt());
+    if (WS->hasArg("mbcoil"))
+        nv.putUShort(NV_KEY_MB_REG_COIL, WS->arg("mbcoil").toInt());
+    if (WS->hasArg("mbdi"))
+        nv.putUShort(NV_KEY_MB_REG_DI, WS->arg("mbdi").toInt());
+    if (WS->hasArg("mbpoll"))
+        nv.putUShort(NV_KEY_MB_POLL_MS, WS->arg("mbpoll").toInt());
+    if (WS->hasArg("vmod"))
+        nv.putBool(NV_KEY_VIRTUAL_MOD, WS->arg("vmod") == "1");
 
-    if (web.hasArg("tcpen"))
-        nv.putBool(NV_KEY_TCP_EN, web.arg("tcpen") == "1");
-    if (web.hasArg("tcpp"))
-        nv.putUShort(NV_KEY_TCP_PORT, web.arg("tcpp").toInt());
+    if (WS->hasArg("tcpen"))
+        nv.putBool(NV_KEY_TCP_EN, WS->arg("tcpen") == "1");
+    if (WS->hasArg("tcpp"))
+        nv.putUShort(NV_KEY_TCP_PORT, WS->arg("tcpp").toInt());
 
-    if (web.hasArg("hostname"))
-        nv.putString(NV_KEY_HOSTNAME, web.arg("hostname"));
+    if (WS->hasArg("hostname"))
+        nv.putString(NV_KEY_HOSTNAME, WS->arg("hostname"));
 
-    if (web.hasArg("wauth"))
-        nv.putBool(NV_KEY_WEB_AUTH, web.arg("wauth") == "1");
-    if (web.hasArg("wauthp"))
-        nv.putString(NV_KEY_WEB_PASS, web.arg("wauthp"));
+    if (WS->hasArg("wauth"))
+        nv.putBool(NV_KEY_WEB_AUTH, WS->arg("wauth") == "1");
+    if (WS->hasArg("wauthp"))
+        nv.putString(NV_KEY_WEB_PASS, WS->arg("wauthp"));
 
     nv.end();
     LOG_ILN("[WEB] Settings saved");
@@ -998,7 +1008,7 @@ static void handleSave()
     // Update config CRC after NVRAM write
     config_write_crc();
 
-    web.send(200, "text/html", pageStart(F("Mentve"), CSS_MINIMAL) + pageStyleEnd() +
+    WS->send(200, "text/html", pageStart(F("Mentve"), CSS_MINIMAL) + pageStyleEnd() +
              F("<h1 class=\"ok\">&#10004; Beállítások elmentve!</h1>"
                "<p>Az eszköz újraindul 3 másodperc múlva...</p>"
                "<script>setTimeout(function(){window.location='/'},5000)</script>"
@@ -1013,7 +1023,7 @@ static void handleRestart()
 {
     if (!web_auth_ok())
         return;
-    web.send(200, "text/html", pageStart(F("Újraindítás"), CSS_MINIMAL) + pageStyleEnd() +
+    WS->send(200, "text/html", pageStart(F("Újraindítás"), CSS_MINIMAL) + pageStyleEnd() +
              F("<h1 class=\"ok\">&#128260; Újraindítás...</h1><p>Az eszköz újraindul.</p>"
                "<script>setTimeout(function(){window.location='/'},10000)</script>"
                "</body></html>"));
@@ -1029,14 +1039,14 @@ static void handleLogout()
     if (!cfg.web_auth)
     {
         // Auth disabled — just redirect
-        web.sendHeader("Location", "/");
-        web.send(302);
+        WS->sendHeader("Location", "/");
+        WS->send(302);
         return;
     }
     // Force browser to drop Digest credentials by requesting re-auth
     // with a different stale realm — then redirect
-    web.sendHeader("Location", "/");
-    web.requestAuthentication(DIGEST_AUTH, "ModbusMQTT-Logout");
+    WS->sendHeader("Location", "/");
+    WS->requestAuthentication();
 }
 
 // ─── PINS PAGE ─────────────────────────────────────────────────
@@ -1049,7 +1059,7 @@ static void handlePins()
     html = pageStart(F("Modbus-MQTT Bridge — Pinek"), CSS_FORMS) + FPSTR(CSS_PINS) + pageStyleEnd();
 
     html += F("<h1>&#128295; GPIO Pinek</h1>");
-    html += navHtml(PG_PINS);
+    html += navHtml(PG_PINS, WS->hasArg("auth") ? ("?auth=" + WS->arg("auth")) : "");
     html += F("<p class=\"note\">-1 = nem használt / letiltott. A pinek megváltoztatása után újraindítás szükséges!</p>"
               "<form action=\"/savepins\" method=\"POST\">");
 
@@ -1098,7 +1108,7 @@ static void handlePins()
     html += "<div class=\"foot\">Modbus-MQTT Bridge v2.0 — ESP32-S3-ETH (6DI+6R) — ESP32-S3</div>";
     html += "</body></html>";
 
-    web.send(200, "text/html", html);
+    WS->send(200, "text/html", html);
 }
 
 // ─── MODULES PAGE ──────────────────────────────────────────────
@@ -1173,7 +1183,7 @@ function toggleDI(addr,di,curState){
 </head><body>)rawliteral";
 
     html += F("<h1>&#128268; Modbus Modulok</h1>");
-    html += navHtml(PG_MODULES);
+    html += navHtml(PG_MODULES, WS->hasArg("auth") ? ("?auth=" + WS->arg("auth")) : "");
 
     if (!scan_active)
     {
@@ -1398,7 +1408,7 @@ function toggleDI(addr,di,curState){
     html += "<div class=\"foot\">Modbus-MQTT Bridge v2.0 — ESP32-S3-ETH (6DI+6R) — ESP32-S3</div>";
     html += "</body></html>";
 
-    web.send(200, "text/html", html);
+    WS->send(200, "text/html", html);
 }
 
 // ─── SAVE PINS HANDLER ─────────────────────────────────────────
@@ -1410,28 +1420,28 @@ static void handleSavePins()
     nv.begin(NV_NAMESPACE, false);
 
     // Partial update — only write if present in POST (D4 bug prevention)
-    if (web.hasArg("prx"))
-        nv.putInt(NV_KEY_PIN_RS485_RX, web.arg("prx").toInt());
-    if (web.hasArg("ptx"))
-        nv.putInt(NV_KEY_PIN_RS485_TX, web.arg("ptx").toInt());
-    if (web.hasArg("pde"))
-        nv.putInt(NV_KEY_PIN_RS485_DE, web.arg("pde").toInt());
-    if (web.hasArg("pled"))
-        nv.putInt(NV_KEY_PIN_LED, web.arg("pled").toInt());
-    if (web.hasArg("pbtn"))
-        nv.putInt(NV_KEY_PIN_BTN, web.arg("pbtn").toInt());
-    if (web.hasArg("pemosi"))
-        nv.putInt(NV_KEY_PIN_ETH_MOSI, web.arg("pemosi").toInt());
-    if (web.hasArg("pemiso"))
-        nv.putInt(NV_KEY_PIN_ETH_MISO, web.arg("pemiso").toInt());
-    if (web.hasArg("pesclk"))
-        nv.putInt(NV_KEY_PIN_ETH_SCLK, web.arg("pesclk").toInt());
-    if (web.hasArg("pecs"))
-        nv.putInt(NV_KEY_PIN_ETH_CS, web.arg("pecs").toInt());
-    if (web.hasArg("peint"))
-        nv.putInt(NV_KEY_PIN_ETH_INT, web.arg("peint").toInt());
-    if (web.hasArg("perst"))
-        nv.putInt(NV_KEY_PIN_ETH_RST, web.arg("perst").toInt());
+    if (WS->hasArg("prx"))
+        nv.putInt(NV_KEY_PIN_RS485_RX, WS->arg("prx").toInt());
+    if (WS->hasArg("ptx"))
+        nv.putInt(NV_KEY_PIN_RS485_TX, WS->arg("ptx").toInt());
+    if (WS->hasArg("pde"))
+        nv.putInt(NV_KEY_PIN_RS485_DE, WS->arg("pde").toInt());
+    if (WS->hasArg("pled"))
+        nv.putInt(NV_KEY_PIN_LED, WS->arg("pled").toInt());
+    if (WS->hasArg("pbtn"))
+        nv.putInt(NV_KEY_PIN_BTN, WS->arg("pbtn").toInt());
+    if (WS->hasArg("pemosi"))
+        nv.putInt(NV_KEY_PIN_ETH_MOSI, WS->arg("pemosi").toInt());
+    if (WS->hasArg("pemiso"))
+        nv.putInt(NV_KEY_PIN_ETH_MISO, WS->arg("pemiso").toInt());
+    if (WS->hasArg("pesclk"))
+        nv.putInt(NV_KEY_PIN_ETH_SCLK, WS->arg("pesclk").toInt());
+    if (WS->hasArg("pecs"))
+        nv.putInt(NV_KEY_PIN_ETH_CS, WS->arg("pecs").toInt());
+    if (WS->hasArg("peint"))
+        nv.putInt(NV_KEY_PIN_ETH_INT, WS->arg("peint").toInt());
+    if (WS->hasArg("perst"))
+        nv.putInt(NV_KEY_PIN_ETH_RST, WS->arg("perst").toInt());
 
     nv.end();
     LOG_ILN("[WEB] Pin config saved");
@@ -1439,7 +1449,7 @@ static void handleSavePins()
     // Update config CRC after NVRAM write
     config_write_crc();
 
-    web.send(200, "text/html",
+    WS->send(200, "text/html",
              pageStart(F("Pinek elmentve"), CSS_MINIMAL) + pageStyleEnd() +
              F("<h1 class=\"ok\">&#10004; Pinek elmentve!</h1>"
                "<p>A GPIO pinek újraindítás után lépnek érvénybe.</p>"
@@ -1463,9 +1473,9 @@ static void handleSaveModules()
         String mn_key = "mn" + String(m.slave_addr);
         String hn_key = "hn" + String(m.slave_addr);
         String ar_key = "ar" + String(m.slave_addr);
-        String mn_val = web.arg(mn_key);
-        String hn_val = web.arg(hn_key);
-        String ar_val = web.arg(ar_key);
+        String mn_val = WS->arg(mn_key);
+        String hn_val = WS->arg(hn_key);
+        String ar_val = WS->arg(ar_key);
 
         config_save_module_name(m.slave_addr, mn_val.c_str(), hn_val.c_str());
 
@@ -1473,7 +1483,7 @@ static void handleSaveModules()
         if (ar_val == "_other")
         {
             String other_key = ar_key + "_other";
-            String other_val = web.arg(other_key);
+            String other_val = WS->arg(other_key);
             other_val.trim();
             if (other_val.length() > 0)
             {
@@ -1520,9 +1530,9 @@ static void handleSaveModules()
         for (uint8_t r = 0; r < HA_V2_RELAY_COUNT; r++)
         {
             String rn_key = "rn" + String(m.slave_addr) + "_" + String(r);
-            if (web.hasArg(rn_key))
+            if (WS->hasArg(rn_key))
             {
-                String rn_val = web.arg(rn_key);
+                String rn_val = WS->arg(rn_key);
                 config_save_relay_name(m.slave_addr, r, rn_val.c_str());
             }
         }
@@ -1531,9 +1541,9 @@ static void handleSaveModules()
         for (uint8_t d = 0; d < HA_V2_DI_COUNT; d++)
         {
             String dn_key = "dn" + String(m.slave_addr) + "_" + String(d);
-            if (web.hasArg(dn_key))
+            if (WS->hasArg(dn_key))
             {
-                String dn_val = web.arg(dn_key);
+                String dn_val = WS->arg(dn_key);
                 config_save_di_name(m.slave_addr, d, dn_val.c_str());
             }
         }
@@ -1551,7 +1561,7 @@ static void handleSaveModules()
         }
     }
 
-    web.send(200, "text/html",
+    WS->send(200, "text/html",
              pageStart(F("Modul nevek elmentve"), CSS_MINIMAL) + pageStyleEnd() +
              F("<h1 class=\"ok\">&#10004; Modul nevek elmentve!</h1>"
                "<p>A modul nevek, szoba, relé/DI nevek mentve lettek.</p>"
@@ -1588,12 +1598,12 @@ static void handleAddRoom()
 {
     if (!web_auth_ok())
         return;
-    String name = web.arg("name");
+    String name = WS->arg("name");
     name.trim();
     if (name.length() == 0)
     {
-        web.sendHeader("Location", "/modules");
-        web.send(302);
+        WS->sendHeader("Location", "/modules");
+        WS->send(302);
         return;
     }
 
@@ -1652,8 +1662,8 @@ static void handleAddRoom()
         }
     }
     nv.end();
-    web.sendHeader("Location", "/modules");
-    web.send(302);
+    WS->sendHeader("Location", "/modules");
+    WS->send(302);
 }
 
 // ─── Delete custom room ────────────────────────────────────────
@@ -1661,20 +1671,20 @@ static void handleDelRoom()
 {
     if (!web_auth_ok())
         return;
-    String name = web.arg("name");
+    String name = WS->arg("name");
     name.trim();
     if (name.length() == 0)
     {
-        web.sendHeader("Location", "/modules");
-        web.send(302);
+        WS->sendHeader("Location", "/modules");
+        WS->send(302);
         return;
     }
 
     // Don't allow deleting default rooms
     if (std::any_of(DEFAULT_ROOMS, DEFAULT_ROOMS + DEFAULT_ROOM_COUNT, [&](const char *dr) { return name == dr; }))
     {
-        web.sendHeader("Location", "/modules");
-        web.send(302);
+        WS->sendHeader("Location", "/modules");
+        WS->send(302);
         return;
     }
 
@@ -1702,8 +1712,8 @@ static void handleDelRoom()
     }
     nv.putString(NV_KEY_ROOMS, newList);
     nv.end();
-    web.sendHeader("Location", "/modules");
-    web.send(302);
+    WS->sendHeader("Location", "/modules");
+    WS->send(302);
 }
 
 // ─── API: scan status (JSON) ────────────────────────────────────
@@ -1724,7 +1734,7 @@ static void handleApiScan()
     json += "\"progress\":" + String(pct) + ",";
     json += "\"modules\":" + String(module_count);
     json += "}";
-    web.send(200, "application/json", json);
+    WS->send(200, "application/json", json);
 }
 
 // ─── Toggle virtual module ON/OFF ────────────────────────────────
@@ -1743,8 +1753,8 @@ static void handleToggleVMod()
         // Just enabled — trigger rescan to insert virtual module
         scan_modbus_start();
         scanning_done = false;
-        web.sendHeader("Location", "/modules");
-        web.send(302);
+        WS->sendHeader("Location", "/modules");
+        WS->send(302);
     }
     else
     {
@@ -1767,8 +1777,8 @@ static void handleToggleVMod()
                 break;
             }
         }
-        web.sendHeader("Location", "/modules");
-        web.send(302);
+        WS->sendHeader("Location", "/modules");
+        WS->send(302);
     }
 }
 
@@ -1781,7 +1791,7 @@ static void handleRescan()
     scanning_done = false;
     LOG_ILN("[WEB] Rescan triggered from web UI (saved list cleared)");
 
-    web.send(200, "text/html", pageStart(F("Buszkeresés"), CSS_MINIMAL) + pageStyleEnd() +
+    WS->send(200, "text/html", pageStart(F("Buszkeresés"), CSS_MINIMAL) + pageStyleEnd() +
              F("<h1 class=\"ok\">&#128260; Buszkeresés elindítva...</h1>"
                "<p>A Modbus busz újraszkennelése folyamatban.</p>"
                "<script>setTimeout(function(){window.location='/modules'},3000)</script>"
@@ -1793,7 +1803,7 @@ static void handleSaveModList()
     if (!web_auth_ok())
         return;
     config_save_module_list();
-    web.send(200, "text/html", pageStart(F("Mentés"), CSS_MINIMAL) + pageStyleEnd() +
+    WS->send(200, "text/html", pageStart(F("Mentés"), CSS_MINIMAL) + pageStyleEnd() +
              F("<h1 class=\"ok\">&#128190; Modullista elmentve!</h1>"
                "<p>A következő bootnál a bridge azonnal betölti a modulokat (scan kihagyása).</p>"
                "<p class=\"note\">Újrascan törli a mentett listát.</p>"
@@ -1861,7 +1871,7 @@ static void handleApiStatus()
     doc["tcp"]["err"] = tcp_get_err_count();
     String payload;
     serializeJson(doc, payload);
-    web.send(200, "application/json", payload);
+    WS->send(200, "application/json", payload);
 }
 
 static void handleApiConfig()
@@ -1891,7 +1901,7 @@ static void handleApiConfig()
     doc["tcp_port"] = cfg.tcp_port;
     String payload;
     serializeJson(doc, payload);
-    web.send(200, "application/json", payload);
+    WS->send(200, "application/json", payload);
 }
 
 static void handleApiModules()
@@ -1932,7 +1942,7 @@ static void handleApiModules()
     }
     String payload;
     serializeJson(doc, payload);
-    web.send(200, "application/json", payload);
+    WS->send(200, "application/json", payload);
 }
 
 // ─── Full Config Export API ──────────────────────────────────
@@ -1951,7 +1961,7 @@ static void handleApiLan()
     doc["pin_miso"] = cfg.pin_eth_miso;
     doc["pin_sclk"] = cfg.pin_eth_sclk;
 
-    int step = web.hasArg("step") ? web.arg("step").toInt() : -1;
+    int step = WS->hasArg("step") ? WS->arg("step").toInt() : -1;
     doc["step"] = step;
 
 #ifdef USE_W5500
@@ -2017,7 +2027,7 @@ static void handleApiLan()
 
     String payload;
     serializeJson(doc, payload);
-    web.send(200, "application/json", payload);
+    WS->send(200, "application/json", payload);
 }
 
 // ─── Config Backup / Restore ──────────────────────────────────
@@ -2124,28 +2134,28 @@ static void handleApiBackup()
     nv.end();
     String payload;
     serializeJson(doc, payload);
-    web.send(200, "application/json", payload);
+    WS->send(200, "application/json", payload);
 }
 
 static void handleApiRestore()
 {
     if (!web_auth_ok())
         return;
-    if (!web.hasArg("plain"))
+    if (!WS->hasArg("plain"))
     {
-        web.send(400, "application/json", "{\"ok\":false,\"error\":\"no body\"}");
+        WS->send(400, "application/json", "{\"ok\":false,\"error\":\"no body\"}");
         return;
     }
     JsonDocument inDoc(PsramAllocator::instance());
-    DeserializationError err = deserializeJson(inDoc, web.arg("plain"));
+    DeserializationError err = deserializeJson(inDoc, WS->arg("plain"));
     if (err)
     {
-        web.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid json\"}");
+        WS->send(400, "application/json", "{\"ok\":false,\"error\":\"invalid json\"}");
         return;
     }
     if (!inDoc.containsKey("type") || strcmp(inDoc["type"], "modbus-mqtt-bridge-backup") != 0)
     {
-        web.send(400, "application/json", "{\"ok\":false,\"error\":\"not a valid backup\"}");
+        WS->send(400, "application/json", "{\"ok\":false,\"error\":\"not a valid backup\"}");
         return;
     }
 
@@ -2225,7 +2235,7 @@ static void handleApiRestore()
     nv.end();
 
     LOG_I("[RESTORE] %d keys written, rebooting...\n", written);
-    web.send(200, "application/json", "{\"ok\":true,\"keys\":" + String(written) + ",\"action\":\"reboot\"}");
+    WS->send(200, "application/json", "{\"ok\":true,\"keys\":" + String(written) + ",\"action\":\"reboot\"}");
     delay(3000);
     ESP.restart();
 }
@@ -2242,7 +2252,7 @@ static void handleAdmin()
     html = pageStart(F("Modbus-MQTT Bridge — Admin"), CSS_FORMS) + pageStyleEnd();
 
     html += F("<h1>&#128272; Admin</h1>");
-    html += navHtml(PG_ADMIN);
+    html += navHtml(PG_ADMIN, WS->hasArg("auth") ? ("?auth=" + WS->arg("auth")) : "");
     html += F("<div class=\"pri\"><b>&#9888; Figyelem!</b> Itt jelszavakat módosítasz. Ha elfelejted a jelszót, csak USB flash-sel lehet visszaállítani!</div>"
               "<form action=\"/saveadmin\" method=\"POST\">"
               "<h2>&#128100; Admin jelszó (Digest Auth)</h2>"
@@ -2269,7 +2279,7 @@ static void handleAdmin()
     html += String(FIRMWARE_VERSION);
     html += pageFoot();
 
-    web.send(200, "text/html", html);
+    WS->send(200, "text/html", html);
 }
 
 static void handleSaveAdmin()
@@ -2277,19 +2287,19 @@ static void handleSaveAdmin()
     if (!web_auth_ok())
         return;
 
-    String action = web.arg("action");
+    String action = WS->arg("action");
 
     if (action == "changepass" || action == "resetpass")
     {
         // Change admin password
-        String curpass = web.arg("curpass");
-        String newpass = web.arg("newpass");
-        String newpass2 = web.arg("newpass2");
+        String curpass = WS->arg("curpass");
+        String newpass = WS->arg("newpass");
+        String newpass2 = WS->arg("newpass2");
 
         // Verify current password
         if (curpass != String(cfg.web_pass))
         {
-            web.send(403, "text/html", pageStart(F("Hiba"), CSS_ERROR) + pageStyleEnd() +
+            WS->send(403, "text/html", pageStart(F("Hiba"), CSS_ERROR) + pageStyleEnd() +
                      F("<h1 class=\"err\">&#10060; Hibás jelenlegi jelszó!</h1><p>A megadott jelszó nem egyezik.</p>"
                        "<a href=\"/admin\">Vissza</a></body></html>"));
             return;
@@ -2305,7 +2315,7 @@ static void handleSaveAdmin()
             // Validate new password
             if (newpass != newpass2)
             {
-                web.send(400, "text/html",
+                WS->send(400, "text/html",
                          pageStart(F("Hiba"), CSS_ERROR) + pageStyleEnd() +
                          F("<h1 class=\"err\">&#10060; A két jelszó nem egyezik!</h1><p>Próbáld újra.</p>"
                            "<a href=\"/admin\">Vissza</a></body></html>"));
@@ -2313,7 +2323,7 @@ static void handleSaveAdmin()
             }
             if (newpass.length() < 4)
             {
-                web.send(400, "text/html",
+                WS->send(400, "text/html",
                          pageStart(F("Hiba"), CSS_ERROR) + pageStyleEnd() +
                          F("<h1 class=\"err\">&#10060; Túl rövid jelszó!</h1><p>Min. 4 karakter szükséges.</p>"
                            "<a href=\"/admin\">Vissza</a></body></html>"));
@@ -2331,7 +2341,7 @@ static void handleSaveAdmin()
         config_write_crc(); // Update config CRC
 
         LOG_ILN("[ADMIN] Web auth password changed");
-        web.send(200, "text/html", pageStart(F("Mentve"), CSS_MINIMAL) + pageStyleEnd() +
+        WS->send(200, "text/html", pageStart(F("Mentve"), CSS_MINIMAL) + pageStyleEnd() +
                  F("<h1 class=\"ok\">&#10004; Admin jelszó elmentve!</h1><p>A változás azonnal érvényes.</p>"
                    "<a href=\"/admin\">Vissza</a></body></html>"));
         return;
@@ -2346,10 +2356,10 @@ static void handleSaveAdmin()
         }
         else
         {
-            String appass = web.arg("appass");
+            String appass = WS->arg("appass");
             if (appass.length() < 8)
             {
-                web.send(400, "text/html",
+                WS->send(400, "text/html",
                          pageStart(F("Hiba"), CSS_ERROR) + pageStyleEnd() +
                          F("<h1 class=\"err\">&#10060; Túl rövid AP jelszó!</h1><p>Min. 8 karakter szükséges a WPA2 miatt.</p>"
                            "<a href=\"/admin\">Vissza</a></body></html>"));
@@ -2372,13 +2382,13 @@ static void handleSaveAdmin()
         config_write_crc(); // Update config CRC
 
         LOG_ILN("[ADMIN] AP password changed, softAP updated");
-        web.send(200, "text/html", pageStart(F("Mentve"), CSS_MINIMAL) + pageStyleEnd() +
+        WS->send(200, "text/html", pageStart(F("Mentve"), CSS_MINIMAL) + pageStyleEnd() +
                  F("<h1 class=\"ok\">&#10004; AP jelszó elmentve!</h1><p>Az AP azonnal újraindult az új jelszóval.</p>"
                    "<a href=\"/admin\">Vissza</a></body></html>"));
         return;
     }
 
-    web.send(400, "text/html", "Bad request");
+    WS->send(400, "text/html", "Bad request");
 }
 
 void web_server_init()
@@ -2417,6 +2427,41 @@ void web_server_init()
     web.on("/api/lan", HTTP_GET, handleApiLan);
     web.begin();
     LOG_ILN("[WEB] Status & Config server started on port 80");
+
+#ifdef USE_W5500
+    // ── Register LAN routes (same handlers, different transport) ──
+    ethWeb.on("/", ETH_HTTP_GET, handleStatus);
+    ethWeb.on("/config", ETH_HTTP_GET, handleConfig);
+    ethWeb.on("/pins", ETH_HTTP_GET, handlePins);
+    ethWeb.on("/modules", ETH_HTTP_GET, handleModules);
+    ethWeb.on("/admin", ETH_HTTP_GET, handleAdmin);
+    ethWeb.on("/ota", ETH_HTTP_GET, handleOtaPage);
+    ethWeb.on("/otaurl", ETH_HTTP_GET, handleOtaFromURL);
+    ethWeb.on("/save", ETH_HTTP_POST, handleSave);
+    ethWeb.on("/savepins", ETH_HTTP_POST, handleSavePins);
+    ethWeb.on("/savemodules", ETH_HTTP_POST, handleSaveModules);
+    ethWeb.on("/savemodlist", ETH_HTTP_POST, handleSaveModList);
+    ethWeb.on("/saveadmin", ETH_HTTP_POST, handleSaveAdmin);
+    ethWeb.on("/addroom", ETH_HTTP_GET, handleAddRoom);
+    ethWeb.on("/delroom", ETH_HTTP_GET, handleDelRoom);
+    ethWeb.on("/togglevmod", ETH_HTTP_GET, handleToggleVMod);
+    ethWeb.on("/relay", ETH_HTTP_GET, handleRelay);
+    ethWeb.on("/di", ETH_HTTP_GET, handleDI);
+    ethWeb.on("/rescan", ETH_HTTP_POST, handleRescan);
+    ethWeb.on("/restart", ETH_HTTP_GET, handleRestart);
+    ethWeb.on("/logout", ETH_HTTP_GET, handleLogout);
+    ethWeb.on("/scanstatus", ETH_HTTP_GET, handleApiScan);
+    ethWeb.on("/api/status", ETH_HTTP_GET, handleApiStatus);
+    ethWeb.on("/api/config", ETH_HTTP_GET, handleApiConfig);
+    ethWeb.on("/api/modules", ETH_HTTP_GET, handleApiModules);
+    ethWeb.on("/api/lan", ETH_HTTP_GET, handleApiLan);
+    ethWeb.on("/api/backup", ETH_HTTP_GET, handleApiBackup);
+    ethWeb.on("/api/restore", ETH_HTTP_POST, handleApiRestore);
+    ethWeb.on("/api/export", ETH_HTTP_GET, handleApiBackup);
+    ethWeb.on("/api/import", ETH_HTTP_POST, handleApiRestore);
+    // ethWeb.begin() is called in eth_init() after W5500 is up
+    LOG_ILN("[WEB] LAN routes registered on EthWebServer");
+#endif
 }
 
 void web_server_loop()

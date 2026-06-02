@@ -114,10 +114,12 @@ a{color:#58a6ff}
 
 // ─── Navigation HTML builder ─────────────────────────────────
 // Returns nav bar with the correct page highlighted
-static String navHtml(WebPage active)
+// authSuffix: if non-empty (e.g. "?auth=admin"), appended to all nav links
+//              so LAN clients stay authenticated across page navigation
+static String navHtml(WebPage active, const String &authSuffix = "")
 {
     String nav;
-    nav.reserve(350);
+    nav.reserve(400);
     nav = F("<div class=\"nav\">");
 
     struct NavItem
@@ -142,11 +144,14 @@ static String navHtml(WebPage active)
             nav += F("class=\"active\" ");
         nav += F("href=\"");
         nav += FPSTR(it.href);
+        nav += authSuffix;
         nav += F("\">");
         nav += FPSTR(it.label);
         nav += F("</a>");
     }
-    nav += F("<a href=\"/logout\" style=\"float:right\">&#128274; Kilépés</a></div>");
+    nav += F("<a href=\"/logout");
+    nav += authSuffix;
+    nav += F("\" style=\"float:right\">&#128274; Kilépés</a></div>");
     return nav;
 }
 
