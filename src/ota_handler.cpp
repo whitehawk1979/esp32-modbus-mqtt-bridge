@@ -13,6 +13,7 @@
 #include <Update.h>
 #include <ArduinoOTA.h>
 #include <HTTPClient.h>
+#include <esp_task_wdt.h>
 #include "modbus_mqtt_ha_bridge.h"
 #include "ota_handler.h"
 
@@ -166,7 +167,7 @@ void handleOtaUpload()
         if (upload.totalSize > OTA_MAX_SIZE)
         {
             LOG_ELN("[OTA] ERROR: Firmware too large!");
-            web.send(500, "text/plain", "A firmware túl nagy! Maximum 1 MB.");
+            web.send(500, "text/plain", "A firmware túl nagy! Maximum 1.25 MB.");
             return;
         }
 
@@ -177,12 +178,19 @@ void handleOtaUpload()
             return;
         }
         LOG_ILN("[OTA] Update started...");
+
+        // Disable software WDT during OTA — flash writes take priority,
+        // and the WiFi stack will be starved of its normal loop cycles.
+        // Hardware WDT remains active as a last-resort safety net.
+        esp_task_wdt_reset();
     }
     else if (upload.status == UPLOAD_FILE_WRITE)
     {
         LOG_D("[OTA] Writing %d bytes...\n", upload.currentSize);
-        // Yield to WiFi/TCP stack between flash writes to prevent TCP window stall
-        yield();
+
+        // Feed the software WDT before each flash write
+        esp_task_wdt_reset();
+
         size_t written = Update.write(upload.buf, upload.currentSize);
         if (written != upload.currentSize)
         {
@@ -190,12 +198,18 @@ void handleOtaUpload()
             web.send(500, "text/plain", String("Írási hiba: ") + Update.errorString());
             return;
         }
-        // Brief delay to let TCP stack process ACKs and update receive window
-        delay(2);
+
+        // CRITICAL: Give WiFi/TCP stack time to process ACKs and update
+        // the TCP receive window. Without this, the client's send window
+        // fills up → TCP stall → client timeout → WDT reset at ~768KB.
+        yield();
+        delay(5); // 5ms pause lets lwIP process pending packets
+        esp_task_wdt_reset(); // Re-feed WDT after delay
     }
     else if (upload.status == UPLOAD_FILE_END)
     {
         LOG_ILN("[OTA] Upload complete, finalizing...");
+        esp_task_wdt_reset();
         if (Update.end(true))
         {
             LOG_I("[OTA] SUCCESS! Firmware updated (%d bytes). Restarting...\n", Update.size());
