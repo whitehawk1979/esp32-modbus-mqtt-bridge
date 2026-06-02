@@ -1,18 +1,19 @@
 # ⚡ ESP32-S3 Modbus-MQTT Bridge
 
-**v2.5.0** — Firmware for ESP32-S3 that bridges KinCony Modbus relay controllers (RS485) to Home Assistant via MQTT. Dual-network (LAN+WiFi), MQTT auto-discovery, 8MB PSRAM optimization, web UI with 6 tabs, Digest Auth, auto-provisioning, OTA updates.
+**v2.7.0** — Firmware for ESP32-S3 that bridges KinCony Modbus relay controllers (RS485) to Home Assistant via MQTT. Dual-server web UI (LAN+WiFi independent), DI→Relay local mapping, MQTT auto-discovery, 8MB PSRAM optimization, Digest Auth, auto-provisioning, OTA updates.
 
 ## Features
 
-- **Dual Network**: W5500 Ethernet (primary) + WiFi (fallback), automatic failover
+- **Dual Web Server**: W5500 Ethernet + WiFi — independent TCP stacks, same UI, both fully functional
+- **DI→Relay Local Mapping**: Physical button → relay toggle via Modbus, no MQTT round-trip needed
 - **MQTT Dual-Transport**: Broker connection over LAN preferred, WiFi fallback, auto-switch on link change
 - **Home Assistant Integration**: MQTT Auto-Discovery — relays, DIs, click counters, bridge sensors appear automatically
 - **PSRAM Optimization**: 8MB OPI PSRAM — discovery buffers, large JSON payloads allocated in SPIRAM
-- **DI Toggle**: Digital inputs togglable from web UI + API (virtual modules)
-- **Web UI**: Dark-themed dashboard — Status, Settings, Pins, Modules, OTA, Admin
+- **mqtt.connected() Guard**: Every publish checks MQTT connection, auto-restart if broker unreachable >5min
+- **Web UI**: Dark-themed dashboard — Status, Settings, Pins, Modules, OTA, Admin (both interfaces)
 - **Digest Auth**: Read endpoints open, write endpoints protected (admin/admin default)
 - **Factory Provisioning**: First boot after flash auto-configures WiFi, LAN, MQTT, modules, auth
-- **OTA Firmware Update**: Browser upload (POST) or ESP32-initiated download (GET from URL)
+- **OTA Firmware Update**: USB flash, browser upload (POST), or ESP32-initiated download (GET from URL)
 - **Backup/Restore**: JSON export/import of all NVRAM settings
 
 ## Supported Hardware
@@ -305,6 +306,17 @@ Firmware output: `.pio/build/esp32-s3-prod/`
 NVRAM versioning: `config_validate()` checks config version + CRC. Mismatch → `factory_provision()` fills missing keys.
 
 ## Changelog
+
+### v2.7.0
+- **Dual Web Server**: `WebServer` (WiFi/lwIP) + `EthWebServer` (LAN/W5500) — independent TCP stacks, same handler code via `WS->` adapter pointer
+- **DI→Relay Local Mapping**: `di_relay_map[6]` per module, DI state change → `modbus_write_coil()` toggle, no MQTT/HA round-trip
+- **Web UI dropdown**: Per-DI relay selector (— / R1–R6) on Modules page, `/api/direlay` POST endpoint
+- **NVRAM persistence**: `di_relay_map` saved/loaded/cleared per module
+- **`mqtt_pub()` wrapper**: `mqtt.connected()` guard on every publish, prevents crash on disconnected broker
+- **Auto-restart >5min**: If MQTT broker unreachable for 5 minutes → `ESP.restart()`
+- **`mqtt_pub()` recursive bug fix**: Wrapper was calling itself → stack overflow crash loop
+- **Auth-aware JS**: `_auth` variable from URL query param for LAN API calls
+- **NAV_HTML auth placeholder**: `{auth}` in templates → runtime replace by handler, nav links work on LAN
 
 ### v2.5.0
 - **MQTT dual-transport**: LAN preferred (EthernetClient), WiFi fallback, auto-switch
