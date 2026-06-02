@@ -100,7 +100,7 @@
 #define MQTT_RECONNECT_MS 5000
 
 // ─── Firmware Version ────────────────────────────────────────
-#define FIRMWARE_VERSION "2.7.0" // Major.Minor.Patch — LAN landing page, WiFi /otaurl
+#define FIRMWARE_VERSION "2.7.1" // 16MB partition table, 3MB app slots
 
 // ─── TCP Modbus Bridge ─────────────────────────────────────────
 #define TCP_PORT 502
