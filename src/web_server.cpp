@@ -1806,7 +1806,7 @@ static void handleApiStatus()
 {
     if (!web_auth_ok())
         return;
-    JsonDocument doc;
+    JsonDocument doc(PsramAllocator::instance());
     doc["hostname"] = cfg.hostname;
     doc["firmware"] = FIRMWARE_VERSION;
     doc["uptime_s"] = millis() / 1000;
@@ -1868,7 +1868,7 @@ static void handleApiConfig()
 {
     if (!web_auth_ok())
         return;
-    JsonDocument doc;
+    JsonDocument doc(PsramAllocator::instance());
     doc["hostname"] = cfg.hostname;
     doc["wifi_ssid"] = cfg.wifi_ssid;
     doc["wifi_mode"] = cfg.wifi_mode;
@@ -1941,7 +1941,7 @@ static void handleApiLan()
 {
     if (!web_auth_ok())
         return;
-    JsonDocument doc;
+    JsonDocument doc(PsramAllocator::instance());
     doc["lan_enabled"] = cfg.lan_enabled;
     doc["lan_type"] = cfg.lan_type;
     doc["pin_rst"] = cfg.pin_eth_rst;
@@ -2136,7 +2136,7 @@ static void handleApiRestore()
         web.send(400, "application/json", "{\"ok\":false,\"error\":\"no body\"}");
         return;
     }
-    JsonDocument inDoc;
+    JsonDocument inDoc(PsramAllocator::instance());
     DeserializationError err = deserializeJson(inDoc, web.arg("plain"));
     if (err)
     {

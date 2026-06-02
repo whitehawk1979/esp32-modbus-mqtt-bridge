@@ -697,7 +697,7 @@ void mqtt_publish_module_online(Slave_Module *mod, bool online)
 // ─── Publish Modbus Stats ──────────────────────────────────────
 void mqtt_publish_stats()
 {
-    JsonDocument doc;
+    JsonDocument doc(PsramAllocator::instance());
     doc["tx"] = mb_stats.tx_count;
     doc["rx"] = mb_stats.rx_count;
     doc["err"] = mb_stats.err_count;

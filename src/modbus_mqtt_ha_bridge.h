@@ -99,7 +99,7 @@
 #define MQTT_RECONNECT_MS 5000
 
 // ─── Firmware Version ────────────────────────────────────────
-#define FIRMWARE_VERSION "2.5.1" // Major.Minor.Patch
+#define FIRMWARE_VERSION "2.5.2" // Major.Minor.Patch
 
 // ─── TCP Modbus Bridge ─────────────────────────────────────────
 #define TCP_PORT 502

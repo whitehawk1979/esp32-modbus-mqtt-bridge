@@ -3,6 +3,7 @@
  *
  * Port 81 (separate from web server on port 80).
  * Pushes: relay/DI state changes (immediate), heartbeat (10s), MQTT status
+ * PSRAM-backed JsonDocument + psram_malloc serialize buffer for large payloads.
  */
 
 #include "modbus_mqtt_ha_bridge.h"
@@ -16,77 +17,98 @@ static WebSocketsServer ws(WS_PORT);
 static uint32_t ws_last_heartbeat = 0;
 static uint8_t ws_client_count = 0;
 
-// Helper: broadcast a named String (WebSockets lib requires non-const ref)
-static void ws_broadcast(String &msg)
+// ─── PSRAM-backed JSON serialize + broadcast ─────────────────
+// Builds JSON into a PSRAM buffer and broadcasts/writes it.
+// Avoids String heap allocation for each WS message.
+
+static void ws_broadcast_doc(JsonDocument &doc)
 {
-    ws.broadcastTXT(msg);
+    size_t len = measureJson(doc) + 1;
+    char *buf = reinterpret_cast<char *>(psram_malloc(len));
+    if (!buf)
+    {
+        // Fallback to stack-allocated String (small messages only)
+        String fallback;
+        serializeJson(doc, fallback);
+        ws.broadcastTXT(fallback);
+        return;
+    }
+    serializeJson(doc, buf, len);
+    ws.broadcastTXT(buf);
+    free(buf);
 }
-static void ws_send(uint8_t num, String &msg)
+
+static void ws_send_doc(uint8_t num, JsonDocument &doc)
 {
-    ws.sendTXT(num, msg);
+    size_t len = measureJson(doc) + 1;
+    char *buf = reinterpret_cast<char *>(psram_malloc(len));
+    if (!buf)
+    {
+        String fallback;
+        serializeJson(doc, fallback);
+        ws.sendTXT(num, fallback);
+        return;
+    }
+    serializeJson(doc, buf, len);
+    ws.sendTXT(num, buf);
+    free(buf);
 }
 
 // ─── JSON builders ──────────────────────────────────────────────
 
-static String ws_relay_json(Slave_Module *mod, uint8_t r)
+static void ws_relay_json(Slave_Module *mod, uint8_t r, JsonDocument &doc)
 {
-    JsonDocument doc;
     doc["type"] = "relay";
     doc["addr"] = mod->slave_addr;
     doc["idx"] = r;
     doc["name"] = config_get_relay_name(mod->slave_addr, r);
     doc["state"] = mod->relays[r].state ? "ON" : "OFF";
-    String out;
-    serializeJson(doc, out);
-    return out;
 }
 
-static String ws_di_json(Slave_Module *mod, uint8_t d, bool state)
+static void ws_di_json(Slave_Module *mod, uint8_t d, bool state, JsonDocument &doc)
 {
-    JsonDocument doc;
     doc["type"] = "di";
     doc["addr"] = mod->slave_addr;
     doc["idx"] = d;
     doc["name"] = config_get_di_name(mod->slave_addr, d);
     doc["state"] = state ? "ON" : "OFF";
-    String out;
-    serializeJson(doc, out);
-    return out;
 }
 
-static String ws_heartbeat_json()
+static void ws_heartbeat_json(JsonDocument &doc)
 {
-    JsonDocument doc(PsramAllocator::instance());
     doc["type"] = "heartbeat";
     doc["uptime"] = millis() / 1000;
     doc["heap_kb"] = ESP.getFreeHeap() / 1024;
+
+    // PSRAM metrics
+    doc["psram_free_kb"] = psram_free() / 1024;
+    doc["psram_total_kb"] = psram_total() / 1024;
+
     doc["mqtt"] = mqtt_is_connected();
     doc["interface"] = cfg.active_if == NET_IF_LAN ? "LAN" : cfg.active_if == NET_IF_WIFI ? "WiFi" : "NONE";
     doc["lan"] = cfg.lan_enabled && eth_is_connected();
     doc["wifi_rssi"] = (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : 0;
+
     JsonArray mods = doc["modules"].to<JsonArray>();
     for (uint16_t i = 0; i < module_count; i++)
     {
         JsonObject m = mods.add<JsonObject>();
         m["addr"] = modules[i].slave_addr;
         m["online"] = modules[i].online;
+        m["model"] = modules[i].model.model_name;
         JsonArray relays = m["relays"].to<JsonArray>();
         for (uint8_t r = 0; r < modules[i].model.RELAY_COUNT; r++)
             relays.add(modules[i].relays[r].state);
+        JsonArray dis = m["dis"].to<JsonArray>();
+        for (uint8_t d = 0; d < modules[i].model.DI_COUNT; d++)
+            dis.add(modules[i].inputs[d].current);
     }
-    String out;
-    serializeJson(doc, out);
-    return out;
 }
 
-static String ws_mqtt_json(bool connected)
+static void ws_mqtt_json(bool connected, JsonDocument &doc)
 {
-    JsonDocument doc;
     doc["type"] = "mqtt";
     doc["connected"] = connected;
-    String out;
-    serializeJson(doc, out);
-    return out;
 }
 
 // ─── Event handler ──────────────────────────────────────────────
@@ -105,17 +127,33 @@ static void ws_event(uint8_t num, WStype_t type, uint8_t *payload, size_t length
         ws_client_count++;
         IPAddress ip = ws.remoteIP(num);
         LOG_D("[WS] Client %u from %d.%d.%d.%d (%u total)\n", num, ip[0], ip[1], ip[2], ip[3], ws_client_count);
-        String hb = ws_heartbeat_json();
-        ws_send(num, hb);
+        JsonDocument doc(PsramAllocator::instance());
+        ws_heartbeat_json(doc);
+        ws_send_doc(num, doc);
         break;
     }
     case WStype_TEXT:
     {
-        String msg = String(reinterpret_cast<const char *>(payload)).substring(0, length);
-        if (msg == "status" || msg.indexOf("\"cmd\":\"status\"") >= 0)
+        // Use stack comparison, no String allocation for simple command check
+        if (length >= 6 && memcmp(payload, "status", 6) == 0)
         {
-            String hb = ws_heartbeat_json();
-            ws_send(num, hb);
+            JsonDocument doc(PsramAllocator::instance());
+            ws_heartbeat_json(doc);
+            ws_send_doc(num, doc);
+        }
+        else if (length > 0)
+        {
+            // Check for {"cmd":"status"} JSON command
+            if (memchr(payload, '"', length))
+            {
+                String msg = String(reinterpret_cast<const char *>(payload)).substring(0, length);
+                if (msg.indexOf("\"cmd\":\"status\"") >= 0)
+                {
+                    JsonDocument doc(PsramAllocator::instance());
+                    ws_heartbeat_json(doc);
+                    ws_send_doc(num, doc);
+                }
+            }
         }
         break;
     }
@@ -140,8 +178,9 @@ void ws_loop()
     ws.loop();
     if (ws_client_count > 0 && millis() - ws_last_heartbeat >= WS_HEARTBEAT)
     {
-        String hb = ws_heartbeat_json();
-        ws_broadcast(hb);
+        JsonDocument doc(PsramAllocator::instance());
+        ws_heartbeat_json(doc);
+        ws_broadcast_doc(doc);
         ws_last_heartbeat = millis();
     }
 }
@@ -150,24 +189,27 @@ void ws_notify_relay(Slave_Module *mod, uint8_t relay_idx)
 {
     if (ws_client_count == 0)
         return;
-    String msg = ws_relay_json(mod, relay_idx);
-    ws_broadcast(msg);
+    JsonDocument doc;
+    ws_relay_json(mod, relay_idx, doc);
+    ws_broadcast_doc(doc);
 }
 
 void ws_notify_di(Slave_Module *mod, uint8_t di_idx, bool state)
 {
     if (ws_client_count == 0)
         return;
-    String msg = ws_di_json(mod, di_idx, state);
-    ws_broadcast(msg);
+    JsonDocument doc;
+    ws_di_json(mod, di_idx, state, doc);
+    ws_broadcast_doc(doc);
 }
 
 void ws_notify_mqtt(bool connected)
 {
     if (ws_client_count == 0)
         return;
-    String msg = ws_mqtt_json(connected);
-    ws_broadcast(msg);
+    JsonDocument doc;
+    ws_mqtt_json(connected, doc);
+    ws_broadcast_doc(doc);
 }
 
 uint8_t ws_client_count_get()
