@@ -252,6 +252,8 @@ void handleOtaFromURL()
     HTTPClient http;
     http.setConnectTimeout(10000);
     http.setTimeout(60000);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); // Follow GitHub 302 redirects
+    http.setRedirectLimit(3);
 
     if (!http.begin(fwUrl))
     {
