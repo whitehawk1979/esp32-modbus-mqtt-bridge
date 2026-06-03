@@ -95,7 +95,7 @@ button:disabled{background:#484f58;cursor:not-allowed}
             String(ESP.getChipRevision()) + "</span></div>";
     html += "<div class=\"row\"><span class=\"key\">Flash méret</span><span class=\"val\">" +
             String(ESP.getFlashChipSize() / 1024 / 1024) + " MB</span></div>";
-    html += "<div class=\"row\"><span class=\"key\">OTA max méret</span><span class=\"val\">1 MB</span></div>";
+    html += "<div class=\"row\"><span class=\"key\">OTA max méret</span><span class=\"val\">1.25 MB</span></div>";
     html += "</div>";
 
     html += "<div class=\"foot\">Modbus-MQTT Bridge v2.0 — ESP32-S3-ETH (6DI+6R) — ESP32-S3</div>";
@@ -162,16 +162,19 @@ void handleOtaUpload()
 
     if (upload.status == UPLOAD_FILE_START)
     {
-        LOG_I("[OTA] Upload start: %s (%d bytes)\n", upload.filename.c_str(), upload.totalSize);
+        // totalSize may be 0 when curl sends multipart without Content-Length in the part header
+        // Fallback: use OTA_MAX_SIZE — Update.end() will validate the actual written size
+        size_t updateSize = (upload.totalSize > 0) ? upload.totalSize : OTA_MAX_SIZE;
+        LOG_I("[OTA] Upload start: %s (declared: %d, using: %u)\n", upload.filename.c_str(), upload.totalSize, updateSize);
 
-        if (upload.totalSize > OTA_MAX_SIZE)
+        if (upload.totalSize > 0 && upload.totalSize > OTA_MAX_SIZE)
         {
             LOG_ELN("[OTA] ERROR: Firmware too large!");
             web.send(500, "text/plain", "A firmware túl nagy! Maximum 1.25 MB.");
             return;
         }
 
-        if (!Update.begin(upload.totalSize))
+        if (!Update.begin(updateSize))
         {
             LOG_E("[OTA] ERROR: Update.begin failed! (%s)\n", Update.errorString());
             web.send(500, "text/plain", String("Nem sikerült elindítani a frissítést: ") + Update.errorString());
@@ -393,6 +396,112 @@ void ota_init()
 
     // Routes for web-based OTA are registered in web_server_init()
     LOG_ILN("[OTA] Web upload handler ready");
+}
+
+// ─── OTA Raw Binary Upload (curl-friendly) ────────────────────
+// POST /api/ota/raw — body = raw firmware.bin, Content-Length required
+// Only registered on WiFi web server (uses 'web' object directly)
+void handleApiOtaRaw()
+{
+    // Auth check via web server credentials
+    if (cfg.web_auth && strlen(cfg.web_pass) > 0)
+    {
+        if (!web.authenticate("admin", cfg.web_pass) &&
+            !(web.hasArg("auth") && web.arg("auth") == String(cfg.web_pass)))
+        {
+            web.requestAuthentication();
+            return;
+        }
+    }
+
+    // Get firmware size from query param (required: ?size=NNNN)
+    // WebServer doesn't parse Content-Length header by default
+    int contentLen = web.arg("size").toInt();
+    LOG_I("[OTA-RAW] Requested size: %d\n", contentLen);
+
+    if (contentLen <= 0 || contentLen > OTA_MAX_SIZE)
+    {
+        web.send(400, "application/json",
+                 "{\"error\":\"invalid_size\",\"size\":" + String(contentLen) + "}");
+        return;
+    }
+
+    if (!Update.begin((size_t)contentLen))
+    {
+        LOG_E("[OTA-RAW] Update.begin failed: %s\n", Update.errorString());
+        web.send(500, "application/json",
+                 "{\"error\":\"update_begin_failed\",\"detail\":\"" + String(Update.errorString()) + "\"}");
+        return;
+    }
+
+    LOG_ILN("[OTA-RAW] Update started...");
+    disableLoopWDT();
+
+    uint8_t buf[4096];
+    size_t totalWritten = 0;
+    size_t remaining = (size_t)contentLen;
+
+    while (remaining > 0)
+    {
+        size_t toRead = (remaining > sizeof(buf)) ? sizeof(buf) : remaining;
+        size_t avail = web.client().available();
+        if (avail < toRead)
+        {
+            // Wait for data with timeout
+            uint32_t t0 = millis();
+            while (web.client().available() < (int)(toRead) && millis() - t0 < 5000)
+            {
+                delay(1);
+            }
+            avail = web.client().available();
+            if (avail == 0)
+            {
+                LOG_ELN("[OTA-RAW] Data timeout!");
+                Update.abort();
+                enableLoopWDT();
+                web.send(500, "application/json", "{\"error\":\"data_timeout\"}");
+                return;
+            }
+        }
+        size_t bytesRead = web.client().readBytes(buf, toRead);
+        if (bytesRead == 0)
+        {
+            LOG_ELN("[OTA-RAW] Read 0 bytes — connection lost?");
+            Update.abort();
+            enableLoopWDT();
+            web.send(500, "application/json", "{\"error\":\"read_failed\"}");
+            return;
+        }
+        size_t written = Update.write(buf, bytesRead);
+        if (written != bytesRead)
+        {
+            LOG_E("[OTA-RAW] Write mismatch: written=%d expected=%d\n", written, bytesRead);
+            Update.abort();
+            enableLoopWDT();
+            web.send(500, "application/json", "{\"error\":\"write_failed\"}");
+            return;
+        }
+        totalWritten += written;
+        remaining -= bytesRead;
+        if (totalWritten % 65536 == 0)
+            LOG_I("[OTA-RAW] %d / %d\n", totalWritten, contentLen);
+    }
+
+    if (Update.end(true))
+    {
+        LOG_ILN("[OTA-RAW] ✅ Update OK! Rebooting...");
+        enableLoopWDT();
+        web.send(200, "application/json", "{\"ok\":true,\"size\":" + String(totalWritten) + "}");
+        delay(500);
+        ESP.restart();
+    }
+    else
+    {
+        LOG_E("[OTA-RAW] Update.end failed: %s\n", Update.errorString());
+        enableLoopWDT();
+        web.send(500, "application/json",
+                 "{\"error\":\"update_end_failed\",\"detail\":\"" + String(Update.errorString()) + "\"}");
+    }
 }
 
 void ota_loop()

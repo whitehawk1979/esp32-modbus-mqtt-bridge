@@ -32,6 +32,7 @@ static byte lan_mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
 void handleOtaPage();
 void handleOtaUpload();
 void handleOtaFromURL();
+void handleApiOtaRaw();
 
 WebServer web(80);
 
@@ -2751,6 +2752,7 @@ void web_server_init()
     web.on("/ota", HTTP_GET, handleOtaPage);
     web.on("/otaupload", HTTP_POST, handleOtaUpload, handleOtaUpload);
     web.on("/otaurl", HTTP_GET, handleOtaFromURL);  // ESP32 downloads firmware from URL (safe OTA)
+    web.on("/api/ota/raw", HTTP_POST, handleApiOtaRaw); // Raw binary POST (curl-friendly, works on LAN+WiFi)
     web.on("/save", HTTP_POST, handleSave);
     web.on("/savepins", HTTP_POST, handleSavePins);
     web.on("/savemodules", HTTP_POST, handleSaveModules);
