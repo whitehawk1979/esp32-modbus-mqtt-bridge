@@ -710,6 +710,13 @@ void mqtt_publish_di_state(Slave_Module *mod, uint8_t di_idx, bool state)
     mqtt_pub(topic_suffix(mod->slave_addr, "di/", di_idx, "state"),
                  state ? "ON" : "OFF", MQTT_RETAIN_STATE);
 
+    // Publish DI input type (latch/momentary) when detected
+    if (mod->inputs[di_idx].detected_type != DI_TYPE_UNKNOWN)
+    {
+        mqtt_pub(topic_suffix(mod->slave_addr, "di/", di_idx, "type"),
+                 di_input_type_str(mod->inputs[di_idx].detected_type), true);
+    }
+
     // Publish DI name as retained sub-topic (for MQTT Explorer visibility)
     String name = config_get_di_name(mod->slave_addr, di_idx);
     if (name.length() > 0)

@@ -266,7 +266,14 @@ void module_add_from_scan(uint8_t addr, uint8_t model_id)
     if (!alloc_module(&mod))
         return;
     memset(mod, 0, sizeof(Slave_Module));
-    memset(mod->di_relay_map, 0xFF, HA_V2_DI_COUNT); // 255 = no mapping
+    memset(mod->di_relay_map, 0xFF, HA_V2_DI_COUNT); // 255 = no mapping (legacy)
+    // Initialize EdgeEvent map: no relay, no actions
+    for (uint8_t d = 0; d < HA_V2_DI_COUNT; d++)
+    {
+        mod->di_edge_map[d].relay = 0xFF;
+        mod->di_edge_map[d].rising_action = DI_EDGE_NONE;
+        mod->di_edge_map[d].falling_action = DI_EDGE_NONE;
+    }
     mod->slave_addr = addr;
     mod->online = true;
     mod->last_seen_ms = millis();
@@ -292,7 +299,14 @@ void module_add_virtual()
     if (!alloc_module(&vmod))
         return;
     memset(vmod, 0, sizeof(Slave_Module));
-    memset(vmod->di_relay_map, 0xFF, HA_V2_DI_COUNT); // 255 = no mapping
+    memset(vmod->di_relay_map, 0xFF, HA_V2_DI_COUNT); // 255 = no mapping (legacy)
+    // Initialize EdgeEvent map: no relay, no actions
+    for (uint8_t d = 0; d < HA_V2_DI_COUNT; d++)
+    {
+        vmod->di_edge_map[d].relay = 0xFF;
+        vmod->di_edge_map[d].rising_action = DI_EDGE_NONE;
+        vmod->di_edge_map[d].falling_action = DI_EDGE_NONE;
+    }
     vmod->slave_addr = 200;
     vmod->online = true;
     vmod->last_seen_ms = millis();
@@ -390,6 +404,67 @@ static bool scan_modbus_next()
     return false; // scan not yet complete
 }
 
+// ─── Execute DI→Relay Edge Action ───────────────────────────────
+// Applies the specified edge action (ON/OFF/TOGGLE) to the relay
+// mapped by di_edge_map[di_idx]. Called on rising and falling DI edges.
+// For physical modules: writes relay via Modbus. For virtual: MQTT only.
+void di_execute_edge_action(Slave_Module *mod, uint8_t di_idx, uint8_t action, bool is_virtual)
+{
+    if (action == DI_EDGE_NONE)
+        return;
+
+    DI_EdgeAction &ea = mod->di_edge_map[di_idx];
+    if (ea.relay == 0xFF || ea.relay >= HA_V2_RELAY_COUNT)
+        return;
+
+    uint8_t r = ea.relay;
+    bool new_state = mod->relays[r].state;
+
+    switch (action)
+    {
+    case DI_EDGE_ON:
+        new_state = true;
+        break;
+    case DI_EDGE_OFF:
+        new_state = false;
+        break;
+    case DI_EDGE_TOG:
+        new_state = !mod->relays[r].state;
+        break;
+    default:
+        return; // DI_EDGE_NONE or invalid
+    }
+
+    if (new_state == mod->relays[r].state && action != DI_EDGE_TOG)
+        return; // Already in target state (skip redundant ON→ON or OFF→OFF)
+
+    mod->relays[r].state = new_state;
+    mod->relays[r].published = false;
+
+    if (!is_virtual)
+    {
+        modbus_write_coil(mod->slave_addr, r, new_state);
+    }
+
+    LOG_I("[DI→RELAY] S%d DI%d→R%d %s: %s (%s)\n",
+          mod->slave_addr, di_idx + 1, r + 1,
+          di_edge_action_str(action),
+          new_state ? "ON" : "OFF",
+          is_virtual ? "virtual" : "hw");
+}
+
+const char *di_edge_action_str(uint8_t action)
+{
+    switch (action)
+    {
+    case DI_EDGE_NONE: return "NONE";
+    case DI_EDGE_ON:   return "ON";
+    case DI_EDGE_OFF:  return "OFF";
+    case DI_EDGE_TOG:  return "TOG";
+    default:           return "?";
+    }
+}
+
 // ─── Polling ─────────────────────────────────────────────────────
 static void poll_all_modules()
 {
@@ -463,17 +538,31 @@ static void poll_all_modules()
                     }
                     if (di_states[d] != prev_state)
                     {
-                        // ── DI→Relay local mapping: toggle mapped relay on DI change ──
-                        uint8_t mapped = mod.di_relay_map[d];
-                        if (mapped != 0xFF && mapped < HA_V2_RELAY_COUNT)
+                        // ── DI→Relay EdgeEvent mapping (v2.8+) ──
+                        // Rising edge (DI went OFF→ON = button pressed)
+                        if (di_states[d] && !prev_state)
                         {
-                            bool new_relay = !mod.relays[mapped].state;
-                            mod.relays[mapped].state = new_relay;
-                            mod.relays[mapped].published = false;
-                            modbus_write_coil(mod.slave_addr, mapped, new_relay);
-                            LOG_I("[DI→RELAY] S%d DI%d→R%d: %s\n",
-                                  mod.slave_addr, d + 1, mapped + 1,
-                                  new_relay ? "ON" : "OFF");
+                            di_execute_edge_action(&mod, d, mod.di_edge_map[d].rising_action, false);
+                        }
+                        // Falling edge (DI went ON→OFF = button released)
+                        if (!di_states[d] && prev_state)
+                        {
+                            di_execute_edge_action(&mod, d, mod.di_edge_map[d].falling_action, false);
+                        }
+                        // Legacy di_relay_map: toggle on any change (backward compat)
+                        if (mod.di_edge_map[d].relay == 0xFF)
+                        {
+                            uint8_t mapped = mod.di_relay_map[d];
+                            if (mapped != 0xFF && mapped < HA_V2_RELAY_COUNT)
+                            {
+                                bool new_relay = !mod.relays[mapped].state;
+                                mod.relays[mapped].state = new_relay;
+                                mod.relays[mapped].published = false;
+                                modbus_write_coil(mod.slave_addr, mapped, new_relay);
+                                LOG_I("[DI→RELAY] S%d DI%d→R%d: %s (legacy)\n",
+                                      mod.slave_addr, d + 1, mapped + 1,
+                                      new_relay ? "ON" : "OFF");
+                            }
                         }
                         mqtt_publish_di_state(&mod, d, di_states[d]);
                     }
@@ -516,17 +605,31 @@ static void poll_all_modules()
                     }
                     if (di_states[d] != prev_state)
                     {
-                        // ── DI→Relay local mapping: toggle mapped relay on DI change ──
-                        uint8_t mapped = mod.di_relay_map[d];
-                        if (mapped != 0xFF && mapped < HA_V2_RELAY_COUNT)
+                        // ── DI→Relay EdgeEvent mapping (v2.8+) ──
+                        // Rising edge (DI went OFF→ON = button pressed)
+                        if (di_states[d] && !prev_state)
                         {
-                            bool new_relay = !mod.relays[mapped].state;
-                            mod.relays[mapped].state = new_relay;
-                            mod.relays[mapped].published = false;
-                            modbus_write_coil(mod.slave_addr, mapped, new_relay);
-                            LOG_I("[DI→RELAY] S%d DI%d→R%d: %s\n",
-                                  mod.slave_addr, d + 1, mapped + 1,
-                                  new_relay ? "ON" : "OFF");
+                            di_execute_edge_action(&mod, d, mod.di_edge_map[d].rising_action, false);
+                        }
+                        // Falling edge (DI went ON→OFF = button released)
+                        if (!di_states[d] && prev_state)
+                        {
+                            di_execute_edge_action(&mod, d, mod.di_edge_map[d].falling_action, false);
+                        }
+                        // Legacy di_relay_map: toggle on any change (backward compat)
+                        if (mod.di_edge_map[d].relay == 0xFF)
+                        {
+                            uint8_t mapped = mod.di_relay_map[d];
+                            if (mapped != 0xFF && mapped < HA_V2_RELAY_COUNT)
+                            {
+                                bool new_relay = !mod.relays[mapped].state;
+                                mod.relays[mapped].state = new_relay;
+                                mod.relays[mapped].published = false;
+                                modbus_write_coil(mod.slave_addr, mapped, new_relay);
+                                LOG_I("[DI→RELAY] S%d DI%d→R%d: %s (legacy)\n",
+                                      mod.slave_addr, d + 1, mapped + 1,
+                                      new_relay ? "ON" : "OFF");
+                            }
                         }
                         mqtt_publish_di_state(&mod, d, di_states[d]);
                     }
@@ -700,6 +803,17 @@ static void do_staged_init()
             // in poll_all_modules, so we don't need to double-publish.
             // The callback mechanism exists so external code can hook in.
         });
+#ifdef USE_SD
+        // ── SD Card init (after LAN, shares FSPI bus) ──
+        if (cfg.sd_enabled)
+        {
+            LOG_ILN("[INIT] SD card...");
+            if (sd_init(cfg.pin_sd_cs))
+                LOG_ILN("[INIT] SD OK");
+            else
+                LOG_ELN("[INIT] SD FAILED — card present?");
+        }
+#endif
         setup_stage = 4;
         break;
     case 4:
@@ -713,18 +827,30 @@ static void do_staged_init()
             nv.begin(NV_NAMESPACE, true);
             for (uint8_t i = 0; i < saved_count; i++)
             {
-                char akey[12], mkey[12], drkey[12];
+                char akey[12], mkey[12], drkey[12], edkey[12];
                 snprintf(akey, sizeof(akey), "%s%u", NV_KEY_MOD_ADDR, i);
                 snprintf(mkey, sizeof(mkey), "%s%u", NV_KEY_MOD_MODEL, i);
                 snprintf(drkey, sizeof(drkey), "%s%u", NV_KEY_MOD_DIRM, i);
+                snprintf(edkey, sizeof(edkey), "%s%u", NV_KEY_MOD_EDGE, i);
                 uint8_t addr = nv.getUChar(akey, 0);
                 uint8_t model_id = nv.getUChar(mkey, 0);
                 module_add_from_scan(addr, model_id);
-                // Restore DI→Relay mapping from NVRAM
+                // Restore DI→Relay mapping from NVRAM (legacy)
                 uint8_t drmap[HA_V2_DI_COUNT];
                 nv.getBytes(drkey, drmap, HA_V2_DI_COUNT);
                 if (modules[i].active)
+                {
                     memcpy(modules[i].di_relay_map, drmap, HA_V2_DI_COUNT);
+                    // Restore DI→Edge mapping from NVRAM (v2.8+)
+                    uint8_t edge_blob[HA_V2_DI_COUNT * 3];
+                    nv.getBytes(edkey, edge_blob, sizeof(edge_blob));
+                    for (uint8_t d = 0; d < HA_V2_DI_COUNT; d++)
+                    {
+                        modules[i].di_edge_map[d].relay = edge_blob[d * 3 + 0];
+                        modules[i].di_edge_map[d].rising_action = edge_blob[d * 3 + 1];
+                        modules[i].di_edge_map[d].falling_action = edge_blob[d * 3 + 2];
+                    }
+                }
             }
             nv.end();
             // Add virtual module if enabled

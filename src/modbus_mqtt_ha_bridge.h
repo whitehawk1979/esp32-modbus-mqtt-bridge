@@ -55,6 +55,9 @@
 #define PIN_ETH_INT 14
 #define PIN_ETH_RST 9
 
+// SD Card (shares FSPI bus with W5500)
+#define PIN_SD_CS 42
+
 // ─── Modbus Configuration ──────────────────────────────────────
 #define MODBUS_BAUD 9600
 #define MODBUS_PARITY SERIAL_8N1
@@ -90,6 +93,11 @@
 #define CLICK_MULTI_MS 200
 #define CLICK_MAX_COUNT 5
 
+// ─── Latch/Momentary Detection ────────────────────────────────
+#define MOMENTARY_THRESHOLD_MS 1000  // Press <1s = momentary, >=1s = latch hold
+#define LATCH_DETECT_MIN_SAMPLES 3   // Need 3 cycles before deciding
+#define LATCH_DETECT_RATIO 70       // >70% momentary → momentary, else latch
+
 // ─── MQTT Configuration ────────────────────────────────────────
 #define MQTT_KEEPALIVE_S 60
 #define MQTT_SOCKET_TIMEOUT 5000
@@ -100,7 +108,7 @@
 #define MQTT_RECONNECT_MS 5000
 
 // ─── Firmware Version ────────────────────────────────────────
-#define FIRMWARE_VERSION "2.7.1" // 16MB partition table, 3MB app slots
+#define FIRMWARE_VERSION "2.8.0" // EdgeEvent DI→Relay mapping, 16MB partition table
 
 // ─── TCP Modbus Bridge ─────────────────────────────────────────
 #define TCP_PORT 502
@@ -183,6 +191,8 @@ enum NetInterface : uint8_t
 #define NV_KEY_PIN_ETH_CS "pecs"
 #define NV_KEY_PIN_ETH_INT "peint"
 #define NV_KEY_PIN_ETH_RST "perst"
+#define NV_KEY_PIN_SD_CS "psdcs"
+#define NV_KEY_SD_EN "sdena"
 #define NV_KEY_MB_PROFILE "mbprof"
 #define NV_KEY_MB_REG_COIL "mbcoil"
 #define NV_KEY_MB_REG_DI "mbdi"
@@ -192,6 +202,7 @@ enum NetInterface : uint8_t
 #define NV_KEY_MOD_ADDR "mlist_a"   // Saved slave address prefix: mlist_a0..15
 #define NV_KEY_MOD_MODEL "mlist_m"  // Saved model_id prefix: mlist_m0..15
 #define NV_KEY_MOD_DIRM "mlist_dr"  // DI→Relay map prefix: mlist_dr0..15 (blob[6])
+#define NV_KEY_MOD_EDGE "mlist_ed" // DI→Edge map prefix: mlist_ed0..15 (blob[18]=6×3bytes)
 #define MAX_SAVED_MODULES 16        // Max modules in saved list
 #define NV_KEY_ROOMS "rooms"        // Custom room list (newline-separated)
 #define MAX_ROOMS 30
@@ -204,6 +215,25 @@ enum NetInterface : uint8_t
 #define NV_KEY_CONFIG_CRC "ccrc"   // CRC32 of all config keys at save time
 #define NV_KEY_CONFIG_VER "cver"   // Config schema version (increment on breaking change)
 #define CONFIG_VERSION     1       // Current schema version
+
+// ─── DI→Relay Edge Event Actions (v1.06 protocol) ───────────────
+// Modeled after KinCony KC868-HA v1.06 EdgeEvent mode:
+// Each DI can trigger a different action on rising and falling edge.
+enum DIEdgeAction : uint8_t
+{
+    DI_EDGE_NONE = 0,  // NoDef — do nothing
+    DI_EDGE_ON   = 1,  // Turn relay ON
+    DI_EDGE_OFF  = 2,  // Turn relay OFF
+    DI_EDGE_TOG  = 3   // Toggle relay
+};
+
+// Per-DI edge action: target relay + rising/falling action
+struct DI_EdgeAction
+{
+    uint8_t relay;              // Target relay index (0-5), or 0xFF = no mapping
+    uint8_t rising_action;     // DI_EDGE_NONE/ON/OFF/TOG — action on press (rising edge)
+    uint8_t falling_action;    // DI_EDGE_NONE/ON/OFF/TOG — action on release (falling edge)
+};
 
 // ─── Click event types ──────────────────────────────────────────
 enum ClickType : uint8_t
@@ -230,6 +260,14 @@ struct HA_Model
     static constexpr uint8_t RELAY_COUNT = HA_V2_RELAY_COUNT;
 };
 
+// ─── DI Input Type (auto-detected) ──────────────────────────────
+enum DIInputType : uint8_t
+{
+    DI_TYPE_UNKNOWN = 0,   // Not yet determined
+    DI_TYPE_LATCH   = 1,   // Toggle/switch — stays ON or OFF (wall switch)
+    DI_TYPE_MOMENTARY = 2  // Push-button — springs back (doorbell, momentary)
+};
+
 // ─── Digital Input state machine ───────────────────────────────
 struct DI_State
 {
@@ -242,6 +280,12 @@ struct DI_State
     ClickType pending;
     bool hold_fired;
     bool published; // State published to MQTT
+    // ── Latch/Momentary auto-detection (v2.8+) ──
+    DIInputType detected_type;    // Auto-detected: UNKNOWN→LATCH or MOMENTARY
+    uint8_t sample_count;         // How many press-release cycles observed
+    uint8_t momentary_votes;      // How many were short presses (<1s)
+    uint32_t last_rising_ms;      // Timestamp of last rising edge
+    uint32_t last_press_duration; // Duration of last completed press (ms)
 };
 
 // ─── Relay state ───────────────────────────────────────────────
@@ -264,7 +308,8 @@ struct Slave_Module
     uint8_t profile;                       // Per-slave profile override (0 = use global)
     Relay_State relays[HA_V2_RELAY_COUNT]; // Always 6
     DI_State inputs[HA_V2_DI_COUNT];       // Always 6
-    uint8_t di_relay_map[HA_V2_DI_COUNT];  // DI→Relay mapping (255 = none)
+    uint8_t di_relay_map[HA_V2_DI_COUNT];  // DI→Relay mapping (255 = none) [LEGACY — for NVRAM compat]
+    DI_EdgeAction di_edge_map[HA_V2_DI_COUNT]; // DI→Relay Edge mapping (v2.8+ EdgeEvent)
     bool discovered;
     bool active;     // Slot in use
     bool is_virtual; // Virtual module (no physical hardware)
@@ -329,6 +374,9 @@ struct AppConfig
     int8_t pin_eth_cs;     // W5500 SPI CS (default: 10)
     int8_t pin_eth_int;    // W5500 INT (default: 14)
     int8_t pin_eth_rst;    // W5500 RST (default: 9)
+    // SD Card (shares FSPI bus with W5500)
+    bool sd_enabled;       // SD card feature enabled
+    int8_t pin_sd_cs;      // SD Card CS (default: 42)
     // Device identity
     char hostname[32]; // mDNS + AP SSID suffix + MQTT client ID (default: "modbusmqtt")
     // Web authentication
@@ -361,6 +409,24 @@ struct ModbusStats
 extern ModbusStats mb_stats;
 
 // ─── Function Prototypes ───────────────────────────────────────
+// DI→Relay edge action executor
+void di_execute_edge_action(Slave_Module *mod, uint8_t di_idx, uint8_t action, bool is_virtual);
+const char *di_edge_action_str(uint8_t action);
+const char *di_input_type_str(uint8_t type);
+
+// sd_handler.cpp
+bool sd_init(int8_t cs_pin);
+void sd_deinit();
+bool sd_is_ok();
+uint64_t sd_total_kb();
+uint64_t sd_used_kb();
+const char *sd_type_str();
+void sd_refresh_stats();
+bool sd_save_register_list(const char *device_name, const char *json_content, size_t json_len);
+char *sd_read_register_list(const char *device_name, size_t *out_len);
+char *sd_list_register_files(size_t *out_len);
+bool sd_delete_register_list(const char *device_name);
+
 // modbus_handler.cpp
 void modbus_init();
 void modbus_set_timeout(uint16_t ms);

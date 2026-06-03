@@ -328,18 +328,30 @@ static void handleDI()
     mqtt_publish_di_state(mod, di, state);
     LOG_I("[WEB] Virtual S%d DI%d → %s\n", addr, di + 1, state ? "ON" : "OFF");
 
-    // ── DI→Relay local mapping for virtual module ──
-    uint8_t mapped = mod->di_relay_map[di];
-    if (mapped != 0xFF && mapped < HA_V2_RELAY_COUNT)
+    // ── DI→Edge mapping for virtual module (v2.8+) ──
+    if (state) // Rising edge (pressed)
     {
-        bool new_relay = !mod->relays[mapped].state;
-        mod->relays[mapped].state = new_relay;
-        mod->relays[mapped].published = false;
-        // Virtual module: no Modbus write, just update state + MQTT publish
-        mqtt_publish_relay_state(mod, mapped);
-        LOG_I("[DI→RELAY] S%d DI%d→R%d: %s (virtual)\n",
-              mod->slave_addr, di + 1, mapped + 1,
-              new_relay ? "ON" : "OFF");
+        di_execute_edge_action(mod, di, mod->di_edge_map[di].rising_action, true);
+    }
+    else // Falling edge (released)
+    {
+        di_execute_edge_action(mod, di, mod->di_edge_map[di].falling_action, true);
+    }
+    // Legacy di_relay_map: toggle on any change (backward compat, only if edge map not active)
+    if (mod->di_edge_map[di].relay == 0xFF)
+    {
+        uint8_t mapped = mod->di_relay_map[di];
+        if (mapped != 0xFF && mapped < HA_V2_RELAY_COUNT)
+        {
+            bool new_relay = !mod->relays[mapped].state;
+            mod->relays[mapped].state = new_relay;
+            mod->relays[mapped].published = false;
+            // Virtual module: no Modbus write, just update state + MQTT publish
+            mqtt_publish_relay_state(mod, mapped);
+            LOG_I("[DI→RELAY] S%d DI%d→R%d: %s (virtual, legacy)\n",
+                  mod->slave_addr, di + 1, mapped + 1,
+                  new_relay ? "ON" : "OFF");
+        }
     }
 
     String resp = "{\"ok\":true,\"addr\":" + String(addr) + ",\"di\":" + String(di) +
@@ -1118,6 +1130,23 @@ static void handlePins()
             String(cfg.pin_eth_rst) + "\" min=\"-1\" max=\"48\"></div>";
     html += "</div>";
 
+    // ── SD Card (shares FSPI bus with W5500) ──
+#ifdef USE_SD
+    html += "<h2>&#128190; SD Kártya</h2>";
+    html += "<div class=\"warn-box\"><b>&#9888; Megosztott SPI busz!</b> W5500 és SD kártya ugyanazt az FSPI buszt "
+            "használja (MOSI=11, MISO=13, SCLK=12). Külön CS: W5500=GPIO10, SD=GPIO42.</div>";
+    html += "<div class=\"row\">";
+    html += "<div class=\"fm\"><label>SD Engedélyezve</label><select name=\"sdena\">"
+            "<option value=\"1\"" + String(cfg.sd_enabled ? " selected" : "") + ">Igen</option>"
+            "<option value=\"0\"" + String(!cfg.sd_enabled ? " selected" : "") + ">Nem</option></select></div>";
+    html += "<div class=\"fm\"><label>SD CS Pin</label><input type=\"number\" name=\"psdcs\" value=\"" +
+            String(cfg.pin_sd_cs) + "\" min=\"-1\" max=\"48\"></div>";
+    html += "</div>";
+#else
+    html += "<h2>&#128190; SD Kártya</h2>";
+    html += "<div class=\"info-box\">SD kártya támogatás nincs belefordítva. Fordítsd <code>-DUSE_SD</code> flaggel.</div>";
+#endif
+
     html += "<button type=\"submit\">&#128190; Mentés & Újraindítás</button></form>";
     html += "<div class=\"foot\">Modbus-MQTT Bridge v2.0 — ESP32-S3-ETH (6DI+6R) — ESP32-S3</div>";
     html += "</body></html>";
@@ -1474,6 +1503,13 @@ static void handleSavePins()
         nv.putInt(NV_KEY_PIN_ETH_INT, WS->arg("peint").toInt());
     if (WS->hasArg("perst"))
         nv.putInt(NV_KEY_PIN_ETH_RST, WS->arg("perst").toInt());
+#ifdef USE_SD
+    // SD Card config
+    if (WS->hasArg("sdena"))
+        nv.putBool(NV_KEY_SD_EN, WS->arg("sdena").toInt() != 0);
+    if (WS->hasArg("psdcs"))
+        nv.putInt(NV_KEY_PIN_SD_CS, WS->arg("psdcs").toInt());
+#endif
 
     nv.end();
     LOG_ILN("[WEB] Pin config saved");
@@ -1875,6 +1911,15 @@ static void handleApiStatus()
     doc["mqtt_connected"] = mqtt_is_connected();
     doc["mqtt_transport"] = mqtt_is_on_lan() ? "LAN" : "WiFi";
     doc["mqtt_tls"] = cfg.mqtt_tls;
+    // SD Card status
+    doc["sd_enabled"] = cfg.sd_enabled;
+    doc["sd_ok"] = sd_is_ok();
+    if (sd_is_ok())
+    {
+        doc["sd_type"] = sd_type_str();
+        doc["sd_total_kb"] = sd_total_kb();
+        doc["sd_used_kb"] = sd_used_kb();
+    }
     doc["modules"] = module_count;
     if (module_count > 0)
     {
@@ -1968,12 +2013,28 @@ static void handleApiModules()
             JsonObject inputs = m["inputs"].to<JsonObject>();
             for (uint8_t d = 0; d < modules[i].model.DI_COUNT; d++)
             {
-                inputs[String(d)] = modules[i].inputs[d].current ? "ON" : "OFF";
+                JsonObject di_obj = inputs["d" + String(d)].to<JsonObject>();
+                di_obj["state"] = modules[i].inputs[d].current ? "ON" : "OFF";
+                di_obj["type"] = di_input_type_str(modules[i].inputs[d].detected_type);
+                di_obj["samples"] = modules[i].inputs[d].sample_count;
+                di_obj["momentary_pct"] = modules[i].inputs[d].sample_count > 0
+                    ? (uint8_t)((uint32_t)modules[i].inputs[d].momentary_votes * 100 / modules[i].inputs[d].sample_count)
+                    : 0;
+                di_obj["last_press_ms"] = modules[i].inputs[d].last_press_duration;
             }
-            // DI→Relay mapping
+            // DI→Relay mapping (legacy)
             JsonArray drmap = m["di_relay_map"].to<JsonArray>();
             for (uint8_t d = 0; d < modules[i].model.DI_COUNT; d++)
                 drmap.add(modules[i].di_relay_map[d]);
+            // DI→Edge mapping (v2.8+)
+            JsonObject emap = m["di_edge_map"].to<JsonObject>();
+            for (uint8_t d = 0; d < modules[i].model.DI_COUNT; d++)
+            {
+                JsonObject e = emap["d" + String(d)].to<JsonObject>();
+                e["relay"] = modules[i].di_edge_map[d].relay;
+                e["rising"] = modules[i].di_edge_map[d].rising_action;
+                e["falling"] = modules[i].di_edge_map[d].falling_action;
+            }
         }
     }
     String payload;
@@ -2021,6 +2082,215 @@ static void handleApiDiRelay()
     config_save_module_list(); // Persist to NVRAM
     LOG_I("[API] DI→Relay map saved for S%d\n", addr);
     WS->send(200, "application/json", "{\"ok\":true}");
+}
+
+// ─── DI→Edge Event mapping API (v2.8+) ──────────────────────────
+// POST /api/diedge?addr=S200&d0_r=R1&d0_ra=1&d0_fa=2&d1_r=255&...
+// dN_r = target relay (0-5 or 255=none), dN_ra = rising action (0-3), dN_fa = falling action (0-3)
+// Actions: 0=NONE, 1=ON, 2=OFF, 3=TOGGLE
+static void handleApiDiEdge()
+{
+    if (!web_auth_ok())
+        return;
+    if (!WS->hasArg("addr"))
+    {
+        WS->send(400, "text/plain", "Missing addr");
+        return;
+    }
+    uint8_t addr = (uint8_t)WS->arg("addr").toInt();
+    Slave_Module *mod = nullptr;
+    for (uint16_t i = 0; i < module_count; i++)
+    {
+        if (modules[i].slave_addr == addr && modules[i].active)
+        {
+            mod = &modules[i];
+            break;
+        }
+    }
+    if (!mod)
+    {
+        WS->send(404, "text/plain", "Module not found");
+        return;
+    }
+    // Update DI→Edge mapping
+    bool changed = false;
+    for (uint8_t d = 0; d < HA_V2_DI_COUNT; d++)
+    {
+        String rkey = "d" + String(d) + "_r";
+        String rakey = "d" + String(d) + "_ra";
+        String fakey = "d" + String(d) + "_fa";
+
+        if (WS->hasArg(rkey))
+        {
+            int rv = WS->arg(rkey).toInt();
+            mod->di_edge_map[d].relay = (uint8_t)constrain(rv, 0, 255);
+            changed = true;
+        }
+        if (WS->hasArg(rakey))
+        {
+            int ra = WS->arg(rakey).toInt();
+            mod->di_edge_map[d].rising_action = (uint8_t)constrain(ra, 0, 3);
+            changed = true;
+        }
+        if (WS->hasArg(fakey))
+        {
+            int fa = WS->arg(fakey).toInt();
+            mod->di_edge_map[d].falling_action = (uint8_t)constrain(fa, 0, 3);
+            changed = true;
+        }
+    }
+    if (changed)
+    {
+        config_save_module_list(); // Persist to NVRAM
+        LOG_I("[API] DI→Edge map saved for S%d\n", addr);
+    }
+    WS->send(200, "application/json", "{\"ok\":true}");
+}
+
+// ─── SD Register List API ───────────────────────────────────────
+// POST /api/sd/save  — save register list JSON to SD
+//   ?device=NIBE_S1156&json={...}
+// GET  /api/sd/list  — list device register files on SD
+// GET  /api/sd/read  — read register list from SD
+//   ?device=NIBE_S1156
+// DELETE /api/sd/del  — delete register list from SD
+//   ?device=NIBE_S1156
+
+static void handleApiSdSave()
+{
+    if (!web_auth_ok()) return;
+    if (!sd_is_ok())
+    {
+        WS->send(503, "application/json", "{\"error\":\"SD not available\"}");
+        return;
+    }
+    if (!WS->hasArg("device") || !WS->hasArg("json"))
+    {
+        WS->send(400, "application/json", "{\"error\":\"missing device or json\"}");
+        return;
+    }
+    String device = WS->arg("device");
+    String json = WS->arg("json");
+    // Sanitize device name: only alphanumeric + underscore
+    for (uint8_t i = 0; i < device.length(); i++)
+    {
+        char c = device[i];
+        if (!isalnum(c) && c != '_')
+        {
+            WS->send(400, "application/json", "{\"error\":\"invalid device name\"}");
+            return;
+        }
+    }
+    bool ok = sd_save_register_list(device.c_str(), json.c_str(), json.length());
+    if (ok)
+        WS->send(200, "application/json", "{\"ok\":true}");
+    else
+        WS->send(500, "application/json", "{\"error\":\"write failed\"}");
+}
+
+static void handleApiSdList()
+{
+    if (!web_auth_ok()) return;
+    if (!sd_is_ok())
+    {
+        WS->send(503, "application/json", "{\"error\":\"SD not available\"}");
+        return;
+    }
+    size_t len = 0;
+    char *buf = sd_list_register_files(&len);
+    if (!buf || len == 0)
+    {
+        WS->send(200, "application/json", "[]");
+        if (buf) free(buf);
+        return;
+    }
+    WS->send(200, "application/json", buf);
+    free(buf);
+}
+
+static void handleApiSdRead()
+{
+    if (!web_auth_ok()) return;
+    if (!sd_is_ok())
+    {
+        WS->send(503, "application/json", "{\"error\":\"SD not available\"}");
+        return;
+    }
+    if (!WS->hasArg("device"))
+    {
+        WS->send(400, "application/json", "{\"error\":\"missing device\"}");
+        return;
+    }
+    String device = WS->arg("device");
+    size_t len = 0;
+    char *buf = sd_read_register_list(device.c_str(), &len);
+    if (!buf)
+    {
+        WS->send(404, "application/json", "{\"error\":\"not found\"}");
+        return;
+    }
+    WS->send(200, "application/json", buf);
+    free(buf);
+}
+
+static void handleApiSdDel()
+{
+    if (!web_auth_ok()) return;
+    if (!sd_is_ok())
+    {
+        WS->send(503, "application/json", "{\"error\":\"SD not available\"}");
+        return;
+    }
+    if (!WS->hasArg("device"))
+    {
+        WS->send(400, "application/json", "{\"error\":\"missing device\"}");
+        return;
+    }
+    String device = WS->arg("device");
+    bool ok = sd_delete_register_list(device.c_str());
+    if (ok)
+        WS->send(200, "application/json", "{\"ok\":true}");
+    else
+        WS->send(404, "application/json", "{\"error\":\"not found\"}");
+}
+
+// ─── SD Enable/Init API ────────────────────────────────────────
+// POST /api/sd/toggle  — enable/disable + init/deinit
+//   ?enabled=1 or ?enabled=0
+static void handleApiSdToggle()
+{
+    if (!web_auth_ok()) return;
+    if (!WS->hasArg("enabled"))
+    {
+        WS->send(400, "application/json", "{\"error\":\"missing enabled\"}");
+        return;
+    }
+    bool en = WS->arg("enabled").toInt() != 0;
+    // Save to NVRAM
+    Preferences nv;
+    nv.begin(NV_NAMESPACE, false);
+    nv.putBool(NV_KEY_SD_EN, en);
+    nv.end();
+    cfg.sd_enabled = en;
+    if (en)
+    {
+        if (sd_init(cfg.pin_sd_cs))
+        {
+            LOG_I("[API] SD enabled + initialized\n");
+            WS->send(200, "application/json", "{\"ok\":true,\"sd_ok\":true}");
+        }
+        else
+        {
+            LOG_E("[API] SD enabled but init FAILED\n");
+            WS->send(200, "application/json", "{\"ok\":true,\"sd_ok\":false}");
+        }
+    }
+    else
+    {
+        sd_deinit();
+        LOG_I("[API] SD disabled\n");
+        WS->send(200, "application/json", "{\"ok\":true,\"sd_ok\":false}");
+    }
 }
 
 // ─── Full Config Export API ──────────────────────────────────
@@ -2503,6 +2773,12 @@ void web_server_init()
     web.on("/api/config", HTTP_GET, handleApiConfig);
     web.on("/api/modules", HTTP_GET, handleApiModules);
     web.on("/api/direlay", HTTP_POST, handleApiDiRelay);
+    web.on("/api/diedge", HTTP_POST, handleApiDiEdge);
+    web.on("/api/sd/save", HTTP_POST, handleApiSdSave);
+    web.on("/api/sd/list", HTTP_GET, handleApiSdList);
+    web.on("/api/sd/read", HTTP_GET, handleApiSdRead);
+    web.on("/api/sd/del", HTTP_DELETE, handleApiSdDel);
+    web.on("/api/sd/toggle", HTTP_POST, handleApiSdToggle);
     web.on("/api/lan", HTTP_GET, handleApiLan);
     web.begin();
     LOG_ILN("[WEB] Status & Config server started on port 80");
@@ -2534,6 +2810,12 @@ void web_server_init()
     ethWeb.on("/api/config", ETH_HTTP_GET, handleApiConfig);
     ethWeb.on("/api/modules", ETH_HTTP_GET, handleApiModules);
     ethWeb.on("/api/direlay", ETH_HTTP_POST, handleApiDiRelay);
+    ethWeb.on("/api/diedge", ETH_HTTP_POST, handleApiDiEdge);
+    ethWeb.on("/api/sd/save", ETH_HTTP_POST, handleApiSdSave);
+    ethWeb.on("/api/sd/list", ETH_HTTP_GET, handleApiSdList);
+    ethWeb.on("/api/sd/read", ETH_HTTP_GET, handleApiSdRead);
+    ethWeb.on("/api/sd/del", ETH_HTTP_POST, handleApiSdDel); // POST (ETH server has no HTTP_DELETE)
+    ethWeb.on("/api/sd/toggle", ETH_HTTP_POST, handleApiSdToggle);
     ethWeb.on("/api/lan", ETH_HTTP_GET, handleApiLan);
     ethWeb.on("/api/backup", ETH_HTTP_GET, handleApiBackup);
     ethWeb.on("/api/restore", ETH_HTTP_POST, handleApiRestore);

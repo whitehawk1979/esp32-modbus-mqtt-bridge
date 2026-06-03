@@ -37,6 +37,12 @@ void click_init(DI_State *di, uint8_t count)
         di[i].holding = false;
         di[i].pending = CLICK_NONE;
         di[i].hold_fired = false;
+        // Latch/Momentary detection init
+        di[i].detected_type = DI_TYPE_UNKNOWN;
+        di[i].sample_count = 0;
+        di[i].momentary_votes = 0;
+        di[i].last_rising_ms = 0;
+        di[i].last_press_duration = 0;
     }
 }
 
@@ -72,6 +78,7 @@ void click_update(DI_State *di, uint8_t idx, bool physical_state)
     {
         s.press_start_ms = now;
         s.hold_fired = false;
+        s.last_rising_ms = now; // Latch/Momentary detection
 
         // If within multi-click window, increment counter
         if (s.click_count > 0 && (now - s.last_click_ms) < CLICK_MULTI_MS)
@@ -93,6 +100,18 @@ void click_update(DI_State *di, uint8_t idx, bool physical_state)
     // ─── While Held ─────────────────────────────────────────────
     if (s.current && !s.hold_fired)
     {
+        // ── Latch detection: DI held >1s without release = likely latch switch ──
+        if (s.detected_type == DI_TYPE_UNKNOWN &&
+            s.last_rising_ms > 0 &&
+            (now - s.last_rising_ms) >= (MOMENTARY_THRESHOLD_MS + 500))
+        {
+            // DI has been ON for >1.5s without release → strong latch indicator
+            s.detected_type = DI_TYPE_LATCH;
+            s.last_press_duration = now - s.last_rising_ms;
+            LOG_I("[DI-DETECT] DI%d: LATCH (held %ums, no release)\n",
+                  idx, s.last_press_duration);
+        }
+
         if ((now - s.press_start_ms) >= CLICK_HOLD_MS)
         {
             s.holding = true;
@@ -112,6 +131,31 @@ void click_update(DI_State *di, uint8_t idx, bool physical_state)
     if (falling)
     {
         uint32_t press_duration = now - s.press_start_ms;
+        s.last_press_duration = press_duration;
+
+        // ── Latch/Momentary auto-detection ──
+        // A completed press-release cycle: classify it
+        if (s.sample_count < 255) s.sample_count++;
+        if (press_duration < MOMENTARY_THRESHOLD_MS)
+            s.momentary_votes = (s.momentary_votes < 255) ? s.momentary_votes + 1 : 255;
+
+        // After enough samples, determine type
+        if (s.detected_type == DI_TYPE_UNKNOWN && s.sample_count >= LATCH_DETECT_MIN_SAMPLES)
+        {
+            uint8_t ratio = (uint32_t)s.momentary_votes * 100 / s.sample_count;
+            if (ratio > LATCH_DETECT_RATIO)
+            {
+                s.detected_type = DI_TYPE_MOMENTARY;
+                LOG_I("[DI-DETECT] DI%d: MOMENTARY (%u/%u = %u%%)\n",
+                      idx, s.momentary_votes, s.sample_count, ratio);
+            }
+            else
+            {
+                s.detected_type = DI_TYPE_LATCH;
+                LOG_I("[DI-DETECT] DI%d: LATCH (%u/%u = %u%% momentary)\n",
+                      idx, s.momentary_votes, s.sample_count, ratio);
+            }
+        }
 
         if (s.holding)
         {
@@ -224,5 +268,16 @@ const char *click_type_mqtt_str(uint8_t ct)
         return "long";
     default:
         return "unknown";
+    }
+}
+
+// ─── DI Input Type to string ─────────────────────────────────
+const char *di_input_type_str(uint8_t type)
+{
+    switch (type)
+    {
+    case DI_TYPE_LATCH:     return "latch";
+    case DI_TYPE_MOMENTARY: return "momentary";
+    default:               return "unknown";
     }
 }

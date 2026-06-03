@@ -68,6 +68,9 @@ static void cfg_defaults()
     cfg.pin_eth_cs = 14;
     cfg.pin_eth_int = 10;
     cfg.pin_eth_rst = 9;
+    // ── SD Card (shares FSPI bus with W5500) ──
+    cfg.sd_enabled = false; // Off by default — enable via web UI
+    cfg.pin_sd_cs = 42;
     // ── Hostname + Auth ──
     strlcpy(cfg.hostname, "modbusmqtt", sizeof(cfg.hostname));
     cfg.web_auth = true;
@@ -373,6 +376,17 @@ static void factory_provision(Preferences &nv)
         nv.putInt(NV_KEY_PIN_ETH_RST, 9);
         dirty = true;
     }
+    // SD Card defaults
+    if (!nv.isKey(NV_KEY_SD_EN))
+    {
+        nv.putBool(NV_KEY_SD_EN, false);
+        dirty = true;
+    }
+    if (!nv.isKey(NV_KEY_PIN_SD_CS))
+    {
+        nv.putInt(NV_KEY_PIN_SD_CS, 42);
+        dirty = true;
+    }
 
     if (dirty)
         Serial.println("[NV] Factory defaults provisioned");
@@ -441,6 +455,9 @@ void config_load()
     cfg.pin_eth_cs = (int8_t)nv.getInt(NV_KEY_PIN_ETH_CS, 14);
     cfg.pin_eth_int = (int8_t)nv.getInt(NV_KEY_PIN_ETH_INT, 10);
     cfg.pin_eth_rst = (int8_t)nv.getInt(NV_KEY_PIN_ETH_RST, 9);
+    // SD Card
+    cfg.sd_enabled = nv.getBool(NV_KEY_SD_EN, false);
+    cfg.pin_sd_cs = (int8_t)nv.getInt(NV_KEY_PIN_SD_CS, 42);
     nv.getString(NV_KEY_HOSTNAME, cfg.hostname, sizeof(cfg.hostname));
 
     cfg.web_auth = nv.getBool(NV_KEY_WEB_AUTH, true);
@@ -661,13 +678,23 @@ void config_save_module_list()
     nv.putUChar(NV_KEY_MOD_LIST_N, count);
     for (uint8_t i = 0; i < count; i++)
     {
-        char akey[12], mkey[12], drkey[12];
+        char akey[12], mkey[12], drkey[12], edkey[12];
         snprintf(akey, sizeof(akey), "%s%u", NV_KEY_MOD_ADDR, i);
         snprintf(mkey, sizeof(mkey), "%s%u", NV_KEY_MOD_MODEL, i);
         snprintf(drkey, sizeof(drkey), "%s%u", NV_KEY_MOD_DIRM, i);
+        snprintf(edkey, sizeof(edkey), "%s%u", NV_KEY_MOD_EDGE, i);
         nv.putUChar(akey, modules[i].slave_addr);
         nv.putUChar(mkey, modules[i].model.model_id);
         nv.putBytes(drkey, modules[i].di_relay_map, HA_V2_DI_COUNT);
+        // EdgeEvent map: 6 × 3 bytes = 18 bytes (relay, rising_action, falling_action)
+        uint8_t edge_blob[HA_V2_DI_COUNT * 3];
+        for (uint8_t d = 0; d < HA_V2_DI_COUNT; d++)
+        {
+            edge_blob[d * 3 + 0] = modules[i].di_edge_map[d].relay;
+            edge_blob[d * 3 + 1] = modules[i].di_edge_map[d].rising_action;
+            edge_blob[d * 3 + 2] = modules[i].di_edge_map[d].falling_action;
+        }
+        nv.putBytes(edkey, edge_blob, sizeof(edge_blob));
     }
     nv.end();
     LOG_I("[CONFIG] Module list saved: %u modules\n", count);
@@ -714,13 +741,15 @@ void config_clear_module_list()
     uint8_t count = nv.getUChar(NV_KEY_MOD_LIST_N, 0);
     for (uint8_t i = 0; i < count && i < MAX_SAVED_MODULES; i++)
     {
-        char akey[12], mkey[12], drkey[12];
+        char akey[12], mkey[12], drkey[12], edkey[12];
         snprintf(akey, sizeof(akey), "%s%u", NV_KEY_MOD_ADDR, i);
         snprintf(mkey, sizeof(mkey), "%s%u", NV_KEY_MOD_MODEL, i);
         snprintf(drkey, sizeof(drkey), "%s%u", NV_KEY_MOD_DIRM, i);
+        snprintf(edkey, sizeof(edkey), "%s%u", NV_KEY_MOD_EDGE, i);
         nv.remove(akey);
         nv.remove(mkey);
         nv.remove(drkey);
+        nv.remove(edkey);
     }
     nv.putUChar(NV_KEY_MOD_LIST_N, 0);
     nv.end();
@@ -1022,7 +1051,8 @@ uint32_t config_compute_crc()
         {NV_KEY_PIN_BTN, false},      {NV_KEY_PIN_ETH_MOSI, false},
         {NV_KEY_PIN_ETH_MISO, false}, {NV_KEY_PIN_ETH_SCLK, false},
         {NV_KEY_PIN_ETH_CS, false},   {NV_KEY_PIN_ETH_INT, false},
-        {NV_KEY_PIN_ETH_RST, false},  {nullptr, false}
+        {NV_KEY_PIN_ETH_RST, false},  {NV_KEY_SD_EN, false},
+        {NV_KEY_PIN_SD_CS, false},   {nullptr, false}
     };
     for (int i = 0; int_keys[i].key; i++)
     {
