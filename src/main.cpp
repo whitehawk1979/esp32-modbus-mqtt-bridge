@@ -20,6 +20,10 @@ uint16_t module_count = 0;
 uint16_t modules_capacity = 0;
 bool scanning_done = false;
 
+// ─── Register Config State ──────────────────────────────────────
+RegisterConfig registers[MAX_REGISTERS];
+uint8_t register_count = 0;
+
 // ─── Network State ─────────────────────────────────────────────
 bool net_connected = false;
 String active_ip = "0.0.0.0";
@@ -711,6 +715,7 @@ void setup()
 
     config_init();
     config_load();
+    config_load_registers();
 
     // ── Watchdog init (before anything else) ──
     wdt_init();
@@ -939,7 +944,8 @@ void loop()
 
     // ── Modbus scan (rescan triggered from web UI) ──────────
     // Scan multiple addresses per loop iteration for faster bus scanning
-    if (scan_active)
+    // Skip scan if Modbus is paused (SD exclusive mode)
+    if (scan_active && !modbus_is_paused())
     {
         for (int i = 0; i < 10 && scan_active; i++)
         {
@@ -950,10 +956,47 @@ void loop()
     // ── Modbus polling ──────────────────────────────────────
     if (scanning_done && module_count > 0)
     {
-        if (millis() - last_poll_ms >= cfg.mb_poll_ms && !bus_busy)
+        if (millis() - last_poll_ms >= cfg.mb_poll_ms && !bus_busy && !modbus_is_paused())
         {
             poll_all_modules();
             last_poll_ms = millis();
+        }
+    }
+
+    // ── Register polling ──────────────────────────────────
+    if (register_count > 0 && scanning_done && mqtt_is_connected() && !bus_busy && !modbus_is_paused())
+    {
+        for (uint8_t i = 0; i < register_count; i++)
+        {
+            RegisterConfig &reg = registers[i];
+            if (!reg.enabled)
+                continue;
+
+            // Respect poll interval per register
+            if (millis() - reg.last_read_ms < cfg.mb_poll_ms)
+                continue;
+
+            uint16_t raw_value = 0;
+            if (modbus_read_register(reg.slave_addr, reg.reg_type, reg.addr, &raw_value))
+            {
+                float new_value = (reg.scale > 0) ? (float)raw_value / (float)reg.scale : (float)raw_value;
+                bool changed = !reg.published || (fabsf(new_value - reg.last_value) > 0.001f);
+
+                reg.last_value = new_value;
+                reg.last_read_ms = millis();
+
+                // Publish discovery on first successful read
+                if (!reg.published)
+                {
+                    mqtt_publish_register_discovery(&reg);
+                }
+
+                // Publish value if changed or not yet published
+                if (changed || !reg.published)
+                {
+                    mqtt_publish_register_value(&reg);
+                }
+            }
         }
     }
 

@@ -13,6 +13,40 @@
 // ─── RS485 Transceiver Control ──────────────────────────────────
 static ModbusMaster node;
 
+// ─── Modbus Pause Flag (for SD exclusive mode) ──────────────────
+// When paused, poll loop skips Modbus queries and RS485 DE stays LOW
+// so GPIO4 can be safely used as SD CS.
+static bool modbus_paused = false;
+
+void modbus_pause()
+{
+    modbus_paused = true;
+    // Drive RS485 DE LOW (receive mode) — this makes GPIO4 safe for SD CS
+    if (cfg.pin_rs485_de >= 0)
+    {
+        digitalWrite(cfg.pin_rs485_de, LOW);
+    }
+    LOG_I("[MODBUS] Paused — RS485 DE driven LOW for SD exclusive mode\n");
+}
+
+void modbus_resume()
+{
+    modbus_paused = false;
+    // RS485 DE will be driven HIGH by pre_transmission() callback
+    // when the next Modbus transaction starts, so no explicit HIGH here.
+    // Just ensure it's in a known LOW state (receive mode) as normal.
+    if (cfg.pin_rs485_de >= 0)
+    {
+        digitalWrite(cfg.pin_rs485_de, LOW);
+    }
+    LOG_I("[MODBUS] Resumed — normal polling restored\n");
+}
+
+bool modbus_is_paused()
+{
+    return modbus_paused;
+}
+
 // ─── Modbus Statistics ─────────────────────────────────────────
 ModbusStats mb_stats = {0, 0, 0, 0, 0, 0};
 
@@ -443,6 +477,40 @@ bool modbus_read_di_do_combined(uint8_t slave, uint8_t di_count, uint8_t do_coun
 
     LOG_D("[MODBUS] Combined DI+DO S%d: DI=0x%04X DO=0x%04X\n", slave, di_mask, do_mask);
 
+    return true;
+}
+
+// ─── Generic Register Read (FC03 / FC04) ───────────────────────
+bool modbus_read_register(uint8_t slave_addr, RegType reg_type, uint16_t reg_addr, uint16_t *value)
+{
+    if (modbus_is_paused())
+        return false;
+
+    set_slave(slave_addr);
+    mb_stats.tx_count++;
+
+    uint8_t result;
+    if (reg_type == REG_HOLDING)
+    {
+        result = node.readHoldingRegisters(reg_addr, 1);
+    }
+    else // REG_INPUT (FC04)
+    {
+        result = node.readInputRegisters(reg_addr, 1);
+    }
+
+    if (result != node.ku8MBSuccess)
+    {
+        mb_stats.err_count++;
+        mb_stats.last_err_code = result;
+        mb_stats.last_err_time = millis();
+        LOG_D("[MODBUS] Register read S%d R%04X FC%02X failed: %d\n", slave_addr, reg_addr, reg_type, result);
+        return false;
+    }
+
+    mb_stats.rx_count++;
+    *value = node.getResponseBuffer(0);
+    LOG_D("[MODBUS] Register read S%d R%04X FC%02X = %u\n", slave_addr, reg_addr, reg_type, *value);
     return true;
 }
 

@@ -218,7 +218,7 @@ void handleOtaUpload()
             LOG_I("[OTA] SUCCESS! Firmware updated (%d bytes). Restarting...\n", Update.size());
             web.send(200, "text/plain", "OK");
             delay(3000);
-            ESP.restart();
+            eth_hard_reset_and_restart();
         }
         else
         {
@@ -346,7 +346,7 @@ void handleOtaFromURL()
         snprintf(okBuf, sizeof(okBuf), "{\"status\":\"ok\",\"bytes\":%d,\"rebooting\":true}", totalWritten);
         web.send(200, "application/json", okBuf);
         delay(3000);
-        ESP.restart();
+        eth_hard_reset_and_restart();
     }
     else
     {
@@ -493,7 +493,7 @@ void handleApiOtaRaw()
         enableLoopWDT();
         web.send(200, "application/json", "{\"ok\":true,\"size\":" + String(totalWritten) + "}");
         delay(500);
-        ESP.restart();
+        eth_hard_reset_and_restart();
     }
     else
     {

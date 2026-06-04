@@ -47,16 +47,20 @@
 #define PIN_STATUS_LED 2 // Built-in LED
 #define PIN_CONFIG_BTN 0 // BOOT button — hold = WiFi config portal
 
-// W5500 SPI Ethernet pins (adjust for your board)
+// W5500 SPI Ethernet pins (Waveshare ESP32-S3-ETH V1.0)
 #define PIN_ETH_MOSI 11
-#define PIN_ETH_MISO 13
-#define PIN_ETH_SCLK 12
-#define PIN_ETH_CS 10
-#define PIN_ETH_INT 14
+#define PIN_ETH_MISO 12
+#define PIN_ETH_SCLK 13
+#define PIN_ETH_CS 14
+#define PIN_ETH_INT 10
 #define PIN_ETH_RST 9
 
-// SD Card (shares FSPI bus with W5500)
-#define PIN_SD_CS 42
+// SD Card (separate SPI bus from W5500!)
+// Waveshare ESP32-S3-ETH V1.0: SD on SPI2 (HSPI), W5500 on FSPI
+#define PIN_SD_MOSI 6
+#define PIN_SD_MISO 5
+#define PIN_SD_SCLK 7
+#define PIN_SD_CS 4
 
 // ─── Modbus Configuration ──────────────────────────────────────
 #define MODBUS_BAUD 9600
@@ -108,7 +112,7 @@
 #define MQTT_RECONNECT_MS 5000
 
 // ─── Firmware Version ────────────────────────────────────────
-#define FIRMWARE_VERSION "2.8.0" // EdgeEvent DI→Relay mapping, 16MB partition table
+#define FIRMWARE_VERSION "2.9.0" // Register Config, Modbus FC03/FC04, MQTT register publish + HA discovery
 
 // ─── TCP Modbus Bridge ─────────────────────────────────────────
 #define TCP_PORT 502
@@ -214,7 +218,7 @@ enum NetInterface : uint8_t
 // ─── Config Integrity (CRC + Version) ──────────────────────────
 #define NV_KEY_CONFIG_CRC "ccrc"   // CRC32 of all config keys at save time
 #define NV_KEY_CONFIG_VER "cver"   // Config schema version (increment on breaking change)
-#define CONFIG_VERSION     1       // Current schema version
+#define CONFIG_VERSION     2       // Current schema version
 
 // ─── DI→Relay Edge Event Actions (v1.06 protocol) ───────────────
 // Modeled after KinCony KC868-HA v1.06 EdgeEvent mode:
@@ -227,13 +231,56 @@ enum DIEdgeAction : uint8_t
     DI_EDGE_TOG  = 3   // Toggle relay
 };
 
-// Per-DI edge action: target relay + rising/falling action
+// ─── Per-DI edge action: target relay + rising/falling action
 struct DI_EdgeAction
 {
     uint8_t relay;              // Target relay index (0-5), or 0xFF = no mapping
     uint8_t rising_action;     // DI_EDGE_NONE/ON/OFF/TOG — action on press (rising edge)
     uint8_t falling_action;    // DI_EDGE_NONE/ON/OFF/TOG — action on release (falling edge)
 };
+
+// ─── Register Config (Modbus FC03/FC04 read + MQTT + HA discovery) ──
+enum RegType : uint8_t
+{
+    REG_HOLDING = 3,   // FC03 Read Holding Registers
+    REG_INPUT   = 4    // FC04 Read Input Registers
+};
+
+enum RegHAClass : uint8_t
+{
+    HAC_SENSOR,         // Generic sensor
+    HAC_TEMPERATURE,    // Temperature °C
+    HAC_HUMIDITY,       // Humidity %
+    HAC_POWER,          // Power W
+    HAC_ENERGY,         // Energy kWh
+    HAC_PRESSURE,       // Pressure
+    HAC_VOLTAGE,        // Voltage V
+    HAC_CURRENT,        // Current A
+    HAC_FREQUENCY,      // Frequency Hz
+    HAC_COP,            // COP (dimensionless, 1-decimal)
+};
+
+struct RegisterConfig
+{
+    uint16_t addr;        // Modbus register address
+    RegType  reg_type;    // FC03 or FC04
+    RegHAClass ha_class;  // HA device_class mapping
+    uint8_t  slave_addr;  // Which slave to read from
+    uint16_t scale;       // Divisor for display (10 = divide by 10, 1 = raw)
+    char     name[24];    // Friendly name (e.g. "Kültér hőmérséklet")
+    char     unit[8];     // Unit string (e.g. "°C", "W", "kWh")
+    bool     enabled;     // Enable/disable this register
+    // Runtime (not saved to NVS)
+    float    last_value;  // Last successfully read value
+    bool     published;   // True after first MQTT publish
+    uint32_t last_read_ms;// Last successful read timestamp
+};
+
+#define MAX_REGISTERS 32  // Max configurable registers
+
+// NVS keys for register persistence
+#define NV_KEY_REG_COUNT "regcnt"   // Number of saved registers
+#define NV_KEY_REG_PREFIX "reg"    // reg0..reg31 binary blobs
 
 // ─── Click event types ──────────────────────────────────────────
 enum ClickType : uint8_t
@@ -369,14 +416,14 @@ struct AppConfig
     int8_t pin_status_led; // Status LED (default: 2)
     int8_t pin_config_btn; // Config button (default: 0)
     int8_t pin_eth_mosi;   // W5500 SPI MOSI (default: 11)
-    int8_t pin_eth_miso;   // W5500 SPI MISO (default: 13)
-    int8_t pin_eth_sclk;   // W5500 SPI CLK (default: 12)
-    int8_t pin_eth_cs;     // W5500 SPI CS (default: 10)
-    int8_t pin_eth_int;    // W5500 INT (default: 14)
-    int8_t pin_eth_rst;    // W5500 RST (default: 9)
-    // SD Card (shares FSPI bus with W5500)
+    int8_t pin_eth_miso;   // W5500 SPI MISO (default: 12)
+    int8_t pin_eth_sclk;   // W5500 SPI CLK (default: 13)
+    int8_t pin_eth_cs;     // W5500 SPI CS  (default: 14)
+    int8_t pin_eth_int;    // W5500 INT     (default: 10)
+    int8_t pin_eth_rst;    // W5500 RST     (default: 9)
+    // SD Card (separate HSPI bus from W5500!)
     bool sd_enabled;       // SD card feature enabled
-    int8_t pin_sd_cs;      // SD Card CS (default: 42)
+    int8_t pin_sd_cs;      // SD Card CS (default: 4)
     // Device identity
     char hostname[32]; // mDNS + AP SSID suffix + MQTT client ID (default: "modbusmqtt")
     // Web authentication
@@ -395,6 +442,10 @@ extern bool scan_active;
 extern uint16_t scan_addr;
 extern bool net_connected; // Any network interface connected
 extern String active_ip;   // Current active IP address
+
+// ─── Register Config State ──────────────────────────────────────
+extern RegisterConfig registers[MAX_REGISTERS];
+extern uint8_t register_count;
 
 // ─── Modbus Statistics ─────────────────────────────────────────
 struct ModbusStats
@@ -418,6 +469,11 @@ const char *di_input_type_str(uint8_t type);
 bool sd_init(int8_t cs_pin);
 void sd_deinit();
 bool sd_is_ok();
+bool sd_has_pin_conflict();
+bool sd_begin_exclusive();
+void sd_end_exclusive();
+bool sd_is_exclusive();
+String sd_test_init();
 uint64_t sd_total_kb();
 uint64_t sd_used_kb();
 const char *sd_type_str();
@@ -426,18 +482,31 @@ bool sd_save_register_list(const char *device_name, const char *json_content, si
 char *sd_read_register_list(const char *device_name, size_t *out_len);
 char *sd_list_register_files(size_t *out_len);
 bool sd_delete_register_list(const char *device_name);
+char *sd_browse_dir(const char *path, size_t *out_len);
+bool sd_mkdir(const char *path);
+bool sd_format();
+bool sd_write_file(const char *path, const uint8_t *data, size_t len);
+char *sd_read_file(const char *path, size_t *out_len);
+bool sd_delete_path(const char *path);
+bool sd_append_file(const char *path, const uint8_t *data, size_t len);
+bool sd_file_exists(const char *path);
+bool sd_remove_file(const char *path);
 
 // modbus_handler.cpp
 void modbus_init();
 void modbus_set_timeout(uint16_t ms);
 void modbus_scan_bus();
 void scan_modbus_start();
+void modbus_pause();
+void modbus_resume();
+bool modbus_is_paused();
 bool modbus_read_identification(uint8_t slave, HA_Model &model);
 bool modbus_read_discrete_inputs(uint8_t slave, uint8_t count, bool *states);
 bool modbus_read_coils(uint8_t slave, uint8_t count, bool *states);
 bool modbus_write_coil(uint8_t slave, uint8_t coil, bool state);
 bool modbus_write_coils(uint8_t slave, uint8_t count, const bool *states);
 bool modbus_read_di_do_combined(uint8_t slave, uint8_t di_count, uint8_t do_count, bool *di_states, bool *do_states);
+bool modbus_read_register(uint8_t slave_addr, RegType reg_type, uint16_t reg_addr, uint16_t *value);
 uint8_t effective_profile(Slave_Module *mod);
 void modbus_set_timeout_for_module(bool online);
 
@@ -485,6 +554,8 @@ void mqtt_publish_stats();
 void mqtt_publish_bridge_discovery();
 void mqtt_publish_bridge_state();
 void mqtt_set_click_module(Slave_Module *mod);
+void mqtt_publish_register_value(RegisterConfig *reg);
+void mqtt_publish_register_discovery(RegisterConfig *reg);
 
 // tcp_bridge.cpp
 void tcp_init();
@@ -501,6 +572,7 @@ bool eth_is_started();
 void eth_set_connected(bool v);
 void eth_set_started(bool v);
 String eth_get_ip();
+void eth_hard_reset_and_restart();
 void eth_web_loop();
 
 // web_server.cpp
@@ -532,6 +604,8 @@ void config_save_relay_name(uint8_t slave_addr, uint8_t idx, const char *name);
 String config_get_relay_name(uint8_t slave_addr, uint8_t idx);
 void config_save_di_name(uint8_t slave_addr, uint8_t idx, const char *name);
 String config_get_di_name(uint8_t slave_addr, uint8_t idx);
+void config_save_registers();
+void config_load_registers();
 
 // ota_handler.cpp
 void ota_init();

@@ -31,7 +31,7 @@ struct EthRoute
     EthHandler handler;
 };
 
-#define ETH_MAX_ROUTES 40
+#define ETH_MAX_ROUTES 50
 
 // ─── EthernetServer subclass with begin() override ───────────
 class EthEthernetServer : public EthernetServer

@@ -127,7 +127,7 @@ void wdt_reboot(const char *reason)
     nv.end();
 
     delay(100);
-    ESP.restart();
+    eth_hard_reset_and_restart();
 }
 
 uint32_t wdt_get_reboots()

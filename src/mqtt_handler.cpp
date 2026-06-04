@@ -321,7 +321,7 @@ void mqtt_loop()
                 {
                     LOG_E("[MQTT] Unreachable >5min — restarting ESP\n");
                     delay(100);
-                    ESP.restart();
+                    eth_hard_reset_and_restart();
                 }
             }
             last_reconnect = millis();
@@ -983,4 +983,128 @@ void mqtt_publish_bridge_state()
 
     // Notify watchdog that MQTT is alive
     wdt_notify_publish();
+}
+
+// ─── Register value MQTT publish ──────────────────────────────
+void mqtt_publish_register_value(RegisterConfig *reg)
+{
+    if (!mqtt.connected() || !reg)
+        return;
+
+    static char topic[128];
+    snprintf(topic, sizeof(topic), "%s/reg/%u/%u/state", cfg.mqtt_prefix, reg->slave_addr, reg->addr);
+
+    static char val[24];
+    if (reg->scale > 1)
+    {
+        float fv = (float)reg->last_value / (float)reg->scale;
+        // For COP, show 1 decimal; otherwise 2 decimals
+        int dec = (reg->ha_class == HAC_COP) ? 1 : 2;
+        snprintf(val, sizeof(val), "%.*f", dec, fv);
+    }
+    else
+    {
+        snprintf(val, sizeof(val), "%.2f", reg->last_value);
+    }
+
+    mqtt_pub(topic, val, false);
+    reg->published = true;
+}
+
+// ─── Register HA auto-discovery ───────────────────────────────
+void mqtt_publish_register_discovery(RegisterConfig *reg)
+{
+    if (!cfg.ha_discovery || !mqtt.connected() || !reg)
+        return;
+
+    JsonDocument doc(PsramAllocator::instance());
+
+    // Unique ID and object ID: hostname_sN_rNNNN
+    static char uid[96];
+    snprintf(uid, sizeof(uid), "%s_s%u_r%u", cfg.hostname, reg->slave_addr, reg->addr);
+
+    doc["name"] = reg->name;
+    doc["unique_id"] = uid;
+    doc["object_id"] = uid;
+
+    // State topic
+    static char st_topic[128];
+    snprintf(st_topic, sizeof(st_topic), "%s/reg/%u/%u/state", cfg.mqtt_prefix, reg->slave_addr, reg->addr);
+    doc["state_topic"] = st_topic;
+
+    // Map RegHAClass to HA device_class + unit_of_measurement + icon
+    const char *device_class = nullptr;
+    const char *unit = reg->unit; // default: use config unit
+    const char *icon = nullptr;
+
+    switch (reg->ha_class)
+    {
+    case HAC_TEMPERATURE:
+        device_class = "temperature";
+        unit = "°C";
+        break;
+    case HAC_HUMIDITY:
+        device_class = "humidity";
+        unit = "%";
+        break;
+    case HAC_POWER:
+        device_class = "power";
+        unit = "W";
+        break;
+    case HAC_ENERGY:
+        device_class = "energy";
+        unit = "kWh";
+        break;
+    case HAC_VOLTAGE:
+        device_class = "voltage";
+        unit = "V";
+        break;
+    case HAC_CURRENT:
+        device_class = "current";
+        unit = "A";
+        break;
+    case HAC_FREQUENCY:
+        device_class = "frequency";
+        unit = "Hz";
+        break;
+    case HAC_PRESSURE:
+        device_class = "pressure";
+        unit = "hPa";
+        break;
+    case HAC_COP:
+        device_class = nullptr;
+        unit = "";
+        icon = "mdi:heat-pump";
+        break;
+    case HAC_SENSOR:
+    default:
+        device_class = nullptr;
+        // unit already set from reg->unit
+        break;
+    }
+
+    if (device_class)
+        doc["device_class"] = device_class;
+    if (unit && unit[0] != '\0')
+        doc["unit_of_measurement"] = unit;
+    if (icon)
+        doc["icon"] = icon;
+
+    // Availability
+    set_availability(doc);
+
+    // Device block — register belongs to the bridge device
+    static char bridge_id[64];
+    snprintf(bridge_id, sizeof(bridge_id), "%s_bridge", cfg.hostname);
+    doc["device"]["identifiers"] = bridge_id;
+    doc["device"]["name"] = String(cfg.hostname) + " Bridge";
+    doc["device"]["mf"] = "Waveshare";
+    doc["device"]["mdl"] = "ESP32-S3-ETH V1.0";
+    doc["device"]["sw"] = FIRMWARE_VERSION;
+
+    // Discovery topic: homeassistant/sensor/hostname_sN_rNNNN/config
+    static char disc_topic[192];
+    snprintf(disc_topic, sizeof(disc_topic), "homeassistant/sensor/%s/config", uid);
+
+    discovery_publish(disc_topic, doc, true);
 }

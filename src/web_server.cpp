@@ -1042,7 +1042,7 @@ static void handleSave()
                "</body></html>"));
 
     delay(3000);
-    ESP.restart();
+    eth_hard_reset_and_restart();
 }
 
 // ─── RESTART Handler ───────────────────────────────────────────
@@ -1055,7 +1055,7 @@ static void handleRestart()
                "<script>setTimeout(function(){window.location='/'},10000)</script>"
                "</body></html>"));
     delay(1000);
-    ESP.restart();
+    eth_hard_reset_and_restart();
 }
 
 // ─── LOGOUT Handler ────────────────────────────────────────────
@@ -1527,7 +1527,7 @@ static void handleSavePins()
                "</body></html>"));
 
     delay(3000);
-    ESP.restart();
+    eth_hard_reset_and_restart();
 }
 
 // ─── SAVE MODULES HANDLER ──────────────────────────────────────
@@ -2294,6 +2294,534 @@ static void handleApiSdToggle()
     }
 }
 
+// ─── SD Card Browser Page ────────────────────────────────────
+static void handleSdCard()
+{
+    if (!web_auth_ok())
+        return;
+
+    // ── Enter SD exclusive mode (pauses Modbus if pin conflict) ──
+    bool exclusiveOk = sd_begin_exclusive();
+    bool inExclusive = sd_is_exclusive();
+
+    String authSuf = WS->hasArg("auth") ? ("?auth=" + WS->arg("auth")) : "";
+
+    String html;
+    html.reserve(8000);
+    html = pageStart(F("Modbus-MQTT Bridge — SD Kártya"), CSS_SD) + pageStyleEnd();
+    html += F("<h1>&#128190; SD Kártya</h1>");
+    html += navHtml(PG_SD, authSuf);
+
+    // ── Exclusive mode banner ────────────────────────────────
+    if (inExclusive)
+    {
+        html += F("<div class=\"sd-exclusive-banner\">&#9888;&#65039; Modbus szünetel az SD használat alatt</div>");
+    }
+
+    // ── SD init failure banner (exclusive mode failed) ────────
+    if (!exclusiveOk && sd_has_pin_conflict())
+    {
+        html += F("<div class=\"sd-init-fail\">Nem sikerült az SD kártyát inicializálni</div>");
+    }
+
+    // ── SD Status Card ────────────────────────────────────────
+    bool sdOk = sd_is_ok();
+    html += F("<div class=\"card\"><h2>&#128202; Állapot</h2>");
+    html += F("<div class=\"row\"><span class=\"key\">SD kártya</span><span class=\"");
+    html += sdOk ? F("on\">&#10004; Aktív") : F("off\">&#10060; Nem elérhető");
+    html += F("</span></div>");
+
+    if (sdOk)
+    {
+        uint64_t totalKb = sd_total_kb();
+        uint64_t usedKb = sd_used_kb();
+        uint64_t freeKb = (totalKb > usedKb) ? (totalKb - usedKb) : 0;
+        html += F("<div class=\"row\"><span class=\"key\">Típus</span><span class=\"val\">");
+        html += htmlEscape(String(sd_type_str()));
+        html += F("</span></div>");
+        html += F("<div class=\"row\"><span class=\"key\">Összes</span><span class=\"val\">");
+        html += String(totalKb);
+        html += F(" KB</span></div>");
+        html += F("<div class=\"row\"><span class=\"key\">Használt</span><span class=\"val\">");
+        html += String(usedKb);
+        html += F(" KB</span></div>");
+        html += F("<div class=\"row\"><span class=\"key\">Szabad</span><span class=\"val\">");
+        html += String(freeKb);
+        html += F(" KB</span></div>");
+    }
+    html += F("</div>");
+
+    // ── SD Enable/Disable Toggle ──────────────────────────────
+    html += F("<div class=\"sd-actions\">");
+    if (cfg.sd_enabled)
+    {
+        html += F("<button onclick=\"toggleSd(0)\" class=\"btn-warn\">SD Letiltása</button>");
+    }
+    else
+    {
+        html += F("<button onclick=\"toggleSd(1)\">SD Engedélyezése</button>");
+    }
+    if (sdOk)
+    {
+        html += F("<button onclick=\"showMkdirDialog()\">&#128193; Mappa létrehozás</button>");
+        html += F("<button onclick=\"showUploadDialog()\">&#128228; Fájl feltöltés</button>");
+        html += F("<button onclick=\"confirmFormat()\" class=\"btn-warn\">&#128465; Formázás</button>");
+    }
+    html += F("</div>");
+
+    // ── File Browser ──────────────────────────────────────────
+    if (sdOk)
+    {
+        html += F("<h2>&#128193; Tallózás</h2>");
+        html += F("<div id=\"breadcrumb\" class=\"breadcrumb\"></div>");
+        html += F("<div id=\"file-list\" class=\"file-list\"></div>");
+    }
+    else
+    {
+        html += F("<div class=\"card\"><p class=\"note\">SD kártya nem elérhető. Csatlakoztass egy SD kártyát és engedélyezd a funkciót.</p></div>");
+    }
+
+    // ── Mkdir Dialog ──────────────────────────────────────────
+    html += F("<div id=\"mkdir-overlay\" class=\"modal-overlay\">"
+              "<div class=\"modal\">"
+              "<button class=\"modal-close\" onclick=\"closeMkdirDialog()\">&times;</button>"
+              "<h2>&#128193; Mappa létrehozása</h2>"
+              "<div class=\"fm\"><label>Mappa neve</label>"
+              "<input id=\"mkdir-name\" placeholder=\"uj_mappa\"></div>"
+              "<button onclick=\"doMkdir()\">Létrehozás</button>"
+              "</div></div>");
+
+    // ── Upload Dialog ─────────────────────────────────────────
+    html += F("<div id=\"upload-overlay\" class=\"modal-overlay\">"
+              "<div class=\"modal\">"
+              "<button class=\"modal-close\" onclick=\"closeUploadDialog()\">&times;</button>"
+              "<h2>&#128228; Fájl feltöltése</h2>"
+              "<form id=\"upload-form\" method=\"POST\" enctype=\"multipart/form-data\">"
+              "<div class=\"upload-area\">"
+              "<input type=\"file\" id=\"upload-file\" name=\"file\" style=\"width:100%;padding:8px;color:#c9d1d9;background:#0d1117;border:1px solid #30363d;border-radius:4px\">"
+              "<p class=\"note\">Fájl kiválasztása, majd Készítés gomb</p>"
+              "</div>"
+              "<button type=\"submit\">Feltöltés</button>"
+              "</form>"
+              "</div></div>");
+
+    // ── File Viewer Modal ─────────────────────────────────────
+    html += F("<div id=\"viewer-overlay\" class=\"modal-overlay\">"
+              "<div class=\"modal\" style=\"max-width:95vw\">"
+              "<button class=\"modal-close\" onclick=\"closeViewer()\">&times;</button>"
+              "<h2 id=\"viewer-title\">Fájl tartalma</h2>"
+              "<pre id=\"viewer-content\"></pre>"
+              "</div></div>");
+
+    // ── Confirm Dialog ────────────────────────────────────────
+    html += F("<div id=\"confirm-overlay\" class=\"confirm-overlay\">"
+              "<div class=\"confirm-box\">"
+              "<p id=\"confirm-msg\">Biztosan?</p>"
+              "<div class=\"btn-row\">"
+              "<button onclick=\"confirmAction()\">Igen</button>"
+              "<button onclick=\"cancelAction()\">Mégsem</button>"
+              "</div></div></div>");
+
+    // ── JavaScript ────────────────────────────────────────────
+    html += F("<script>"
+              "var curPath='/';var pendingFn=null;"
+              "var authSuf='");
+    html += authSuf;
+    html += F("';"
+              "function authQ(){return authSuf?('&'+authSuf.substring(1)):'';}"
+              "");
+
+    // browse
+    html += F("function browse(p){"
+              "curPath=p;"
+              "fetch('/api/sd/browse?path='+encodeURIComponent(p)+authQ())"
+              ".then(r=>r.json())"
+              ".then(d=>{"
+              "renderBreadcrumb(d.path);"
+              "renderFiles(d.path,d.entries);"
+              "}).catch(e=>{document.getElementById('file-list').innerHTML='<p class=\"note\">Hiba: '+e+'</p>';});"
+              "}");
+
+    // render breadcrumb
+    html += F("function renderBreadcrumb(path){"
+              "var bc=document.getElementById('breadcrumb');"
+              "var parts=path.split('/').filter(Boolean);"
+              "var html='<a href=\"#\" onclick=\"browse(\\'/\\');return false;\">&#128193; /</a>';"
+              "var cur='/';"
+              "for(var i=0;i<parts.length;i++){"
+              "cur+='/'+parts[i];"
+              "html+='<span>/</span><a href=\"#\" onclick=\"browse(\\''+cur+'\\');return false;\">'+parts[i]+'</a>';"
+              "}"
+              "bc.innerHTML=html;"
+              "}");
+
+    // render files
+    html += F("function renderFiles(path,entries){"
+              "var el=document.getElementById('file-list');"
+              "if(!entries||entries.length==0){el.innerHTML='<p class=\"note\">Üres mappa</p>';return;}"
+              "var html='';"
+              "for(var i=0;i<entries.length;i++){"
+              "var e=entries[i];"
+              "var fullPath=(path=='/'?'/':path+'/')+e.name;"
+              "html+='<div class=\"file-entry\">';"
+              "html+='<div class=\"file-info\">';"
+              "if(e.is_dir){"
+              "html+='<span class=\"dir-icon\">&#128193;</span>';"
+              "html+='<a class=\"file-name\" href=\"#\" onclick=\"browse(\\''+fullPath+'\\');return false;\">'+e.name+'</a>';"
+              "}else{"
+              "html+='<span class=\"file-icon\">&#128196;</span>';"
+              "var ext=e.name.split('.').pop().toLowerCase();"
+              "if(ext==='json'||ext==='txt'||ext==='csv'||ext==='cfg'||ext==='log'||ext==='ini'){"
+              "html+='<a class=\"file-name\" href=\"#\" onclick=\"viewFile(\\''+fullPath+'\\');return false;\">'+e.name+'</a>';"
+              "}else{"
+              "html+='<span class=\"file-name\">'+e.name+'</span>';"
+              "}"
+              "html+='<span class=\"file-size\">'+formatSize(e.size)+'</span>';"
+              "}"
+              "html+='</div>';"
+              "html+='<div class=\"file-actions\">';"
+              "html+='<button class=\"btn-del\" onclick=\"confirmDelete(\\''+fullPath+'\\',\\''+e.name+'\\')\">Törlés</button>';"
+              "html+='</div></div>';"
+              "}"
+              "el.innerHTML=html;"
+              "}");
+
+    // format size
+    html += F("function formatSize(s){"
+              "if(s<1024)return s+' B';"
+              "if(s<1048576)return (s/1024).toFixed(1)+' KB';"
+              "return (s/1048576).toFixed(1)+' MB';"
+              "}");
+
+    // view file
+    html += F("function viewFile(p){"
+              "fetch('/api/sd/view?path='+encodeURIComponent(p)+authQ())"
+              ".then(r=>{if(!r.ok)throw new Error('Nem olvasható');return r.text();})");
+    html += F(".then(t=>{"
+              "document.getElementById('viewer-title').textContent=p.split('/').pop();"
+              "document.getElementById('viewer-content').textContent=t;"
+              "document.getElementById('viewer-overlay').classList.add('active');"
+              "}).catch(e=>{alert('Hiba: '+e);});"
+              "}");
+
+    html += F("function closeViewer(){document.getElementById('viewer-overlay').classList.remove('active');}");
+
+    // confirm delete
+    html += F("function confirmDelete(p,n){"
+              "document.getElementById('confirm-msg').textContent='Biztosan törlöd: '+n+'?';"
+              "pendingFn=function(){doDelete(p);};"
+              "document.getElementById('confirm-overlay').classList.add('active');"
+              "}");
+
+    html += F("function doDelete(p){"
+              "fetch('/api/sd/remove?path='+encodeURIComponent(p)+authQ(),{method:'POST'})"
+              ".then(r=>r.json())"
+              ".then(d=>{browse(curPath);})"
+              ".catch(e=>{alert('Törlés sikertelen: '+e);});"
+              "}");
+
+    // confirm format
+    html += F("function confirmFormat(){"
+              "document.getElementById('confirm-msg').textContent='Biztosan formázod az SD kártyát? MINDEN adat törlődik!';"
+              "pendingFn=function(){doFormat();};"
+              "document.getElementById('confirm-overlay').classList.add('active');"
+              "}");
+
+    html += F("function doFormat(){"
+              "fetch('/api/sd/format'+authQ(),{method:'POST'})"
+              ".then(r=>r.json())"
+              ".then(d=>{browse('/');})"  // Refresh the page to show emptied card
+              ".catch(e=>{alert('Formázás sikertelen: '+e);});"
+              "}");
+
+    // toggle SD
+    html += F("function toggleSd(en){"
+              "fetch('/api/sd/toggle?enabled='+en+authQ(),{method:'POST'})"
+              ".then(r=>r.json())"  // Reload page to reflect changes
+              ".then(d=>{location.reload();})"  // Force reload
+              ".catch(e=>{alert('Hiba: '+e);});"
+              "}");
+
+    // mkdir
+    html += F("function showMkdirDialog(){document.getElementById('mkdir-overlay').classList.add('active');document.getElementById('mkdir-name').value='';document.getElementById('mkdir-name').focus();}");
+    html += F("function closeMkdirDialog(){document.getElementById('mkdir-overlay').classList.remove('active');}");
+
+    html += F("function doMkdir(){"
+              "var n=document.getElementById('mkdir-name').value.trim();"
+              "if(!n){alert('Adj meg nevet!');return;}"
+              "var p=(curPath=='/'?'/'  : curPath+'/')+n;"
+              "fetch('/api/sd/mkdir?path='+encodeURIComponent(p)+authQ(),{method:'POST'})"
+              ".then(r=>r.json())"
+              ".then(d=>{closeMkdirDialog();browse(curPath);})"
+              ".catch(e=>{alert('Hiba: '+e);});"
+              "}");
+
+    // upload
+    html += F("function showUploadDialog(){"
+              "document.getElementById('upload-overlay').classList.add('active');"
+              "document.getElementById('upload-form').action='/api/sd/upload?dir='+encodeURIComponent(curPath)+authQ();"
+              "}");
+    html += F("function closeUploadDialog(){document.getElementById('upload-overlay').classList.remove('active');}");
+
+    // confirm/cancel
+    html += F("function confirmAction(){if(pendingFn)pendingFn();pendingFn=null;document.getElementById('confirm-overlay').classList.remove('active');}");
+    html += F("function cancelAction(){pendingFn=null;document.getElementById('confirm-overlay').classList.remove('active');}");
+
+    // Init
+    html += F("if(");
+    html += sdOk ? F("true") : F("false");
+    html += F(")browse('/');"
+              "</script>");
+
+    html += pageFoot();
+    WS->send(200, "text/html", html);
+
+    // ── End SD exclusive mode (resumes Modbus if was paused) ──
+    sd_end_exclusive();
+}
+// GET /api/sd/browse?path=/
+static void handleApiSdBrowse()
+{
+    if (!web_auth_ok()) return;
+    // Enter SD exclusive mode for this API call
+    if (!sd_begin_exclusive())
+    {
+        WS->send(503, "application/json", "{\"error\":\"SD not available\"}");
+        return;
+    }
+    if (!WS->hasArg("path"))
+    {
+        WS->send(400, "application/json", "{\"error\":\"missing path\"}");
+        sd_end_exclusive();
+        return;
+    }
+    String path = WS->arg("path");
+    // Basic path traversal protection
+    if (path.indexOf("..") >= 0)
+    {
+        WS->send(400, "application/json", "{\"error\":\"invalid path\"}");
+        sd_end_exclusive();
+        return;
+    }
+    size_t len = 0;
+    char *buf = sd_browse_dir(path.c_str(), &len);
+    if (!buf || len == 0)
+    {
+        WS->send(200, "application/json", "{\"path\":\"/\",\"entries\":[]}");
+        if (buf) free(buf);
+        sd_end_exclusive();
+        return;
+    }
+    WS->send(200, "application/json", buf);
+    free(buf);
+    sd_end_exclusive();
+}
+
+// ─── SD View File API ────────────────────────────────────────
+// GET /api/sd/view?path=/registers/test.json
+static void handleApiSdView()
+{
+    if (!web_auth_ok()) return;
+    if (!sd_begin_exclusive())
+    {
+        WS->send(503, "text/plain", "SD not available");
+        return;
+    }
+    if (!WS->hasArg("path"))
+    {
+        WS->send(400, "text/plain", "missing path");
+        sd_end_exclusive();
+        return;
+    }
+    String path = WS->arg("path");
+    if (path.indexOf("..") >= 0)
+    {
+        WS->send(400, "text/plain", "invalid path");
+        sd_end_exclusive();
+        return;
+    }
+    size_t len = 0;
+    char *buf = sd_read_file(path.c_str(), &len);
+    if (!buf)
+    {
+        WS->send(404, "text/plain", "File not found");
+        sd_end_exclusive();
+        return;
+    }
+    // Determine content type from extension
+    String ct = "text/plain";
+    if (path.endsWith(".json")) ct = "application/json";
+    else if (path.endsWith(".csv")) ct = "text/csv";
+    else if (path.endsWith(".html")) ct = "text/html";
+
+    WS->send(200, ct, buf);
+    free(buf);
+    sd_end_exclusive();
+}
+
+// ─── SD Remove API ───────────────────────────────────────────
+// POST /api/sd/remove?path=/registers/test.json
+static void handleApiSdRemove()
+{
+    if (!web_auth_ok()) return;
+    if (!sd_begin_exclusive())
+    {
+        WS->send(503, "application/json", "{\"error\":\"SD not available\"}");
+        return;
+    }
+    if (!WS->hasArg("path"))
+    {
+        WS->send(400, "application/json", "{\"error\":\"missing path\"}");
+        sd_end_exclusive();
+        return;
+    }
+    String path = WS->arg("path");
+    if (path.indexOf("..") >= 0 || path == "/")
+    {
+        WS->send(400, "application/json", "{\"error\":\"invalid path\"}");
+        sd_end_exclusive();
+        return;
+    }
+    bool ok = sd_delete_path(path.c_str());
+    if (ok)
+        WS->send(200, "application/json", "{\"ok\":true}");
+    else
+        WS->send(500, "application/json", "{\"error\":\"delete failed\"}");
+    sd_end_exclusive();
+}
+
+// ─── SD Mkdir API ────────────────────────────────────────────
+// POST /api/sd/mkdir?path=/test_dir
+static void handleApiSdMkdir()
+{
+    if (!web_auth_ok()) return;
+    if (!sd_begin_exclusive())
+    {
+        WS->send(503, "application/json", "{\"error\":\"SD not available\"}");
+        return;
+    }
+    if (!WS->hasArg("path"))
+    {
+        WS->send(400, "application/json", "{\"error\":\"missing path\"}");
+        sd_end_exclusive();
+        return;
+    }
+    String path = WS->arg("path");
+    if (path.indexOf("..") >= 0)
+    {
+        WS->send(400, "application/json", "{\"error\":\"invalid path\"}");
+        sd_end_exclusive();
+        return;
+    }
+    bool ok = sd_mkdir(path.c_str());
+    if (ok)
+        WS->send(200, "application/json", "{\"ok\":true}");
+    else
+        WS->send(500, "application/json", "{\"error\":\"mkdir failed\"}");
+    sd_end_exclusive();
+}
+
+// ─── SD Format API ───────────────────────────────────────────
+// POST /api/sd/format
+static void handleApiSdFormat()
+{
+    if (!web_auth_ok()) return;
+    if (!sd_begin_exclusive())
+    {
+        WS->send(503, "application/json", "{\"error\":\"SD not available\"}");
+        return;
+    }
+    LOG_I("[API] SD format requested\n");
+    bool ok = sd_format();
+    if (ok)
+        WS->send(200, "application/json", "{\"ok\":true}");
+    else
+        WS->send(500, "application/json", "{\"error\":\"format failed\"}");
+    sd_end_exclusive();
+}
+
+// ─── SD Upload API ───────────────────────────────────────────
+// POST /api/sd/upload?dir=/registers  — multipart file upload
+static void handleApiSdUpload()
+{
+    if (!web_auth_ok()) return;
+
+    // For WiFi WebServer: use HTTPUpload to get file
+    HTTPUpload &upload = web.upload();
+    static String uploadPath;
+    static bool upload_exclusive = false;
+
+    if (upload.status == UPLOAD_FILE_START)
+    {
+        // Enter SD exclusive mode at the start of upload
+        if (!sd_begin_exclusive())
+        {
+            WS->send(503, "application/json", "{\"error\":\"SD not available\"}");
+            return;
+        }
+        upload_exclusive = true;
+
+        String dir = WS->hasArg("dir") ? WS->arg("dir") : "/";
+        if (dir.indexOf("..") >= 0)
+        {
+            WS->send(400, "application/json", "{\"error\":\"invalid dir\"}");
+            sd_end_exclusive();
+            upload_exclusive = false;
+            return;
+        }
+
+        String filename = upload.filename;
+        if (filename.length() == 0)
+        {
+            LOG_E("[API] SD upload: empty filename\n");
+            sd_end_exclusive();
+            upload_exclusive = false;
+            return;
+        }
+        // Sanitize: keep only the base filename
+        int slash = filename.lastIndexOf('/');
+        int bslash = filename.lastIndexOf('\\');
+        int lastSep = (slash > bslash) ? slash : bslash;
+        if (lastSep >= 0) filename = filename.substring(lastSep + 1);
+
+        uploadPath = dir;
+        if (!uploadPath.endsWith("/")) uploadPath += "/";
+        uploadPath += filename;
+
+        // Remove existing file if present
+        if (sd_file_exists(uploadPath.c_str()))
+            sd_remove_file(uploadPath.c_str());
+
+        LOG_I("[API] SD upload start: %s\n", uploadPath.c_str());
+    }
+    else if (upload.status == UPLOAD_FILE_WRITE)
+    {
+        // Append data to SD file via sd_handler
+        if (uploadPath.length() > 0)
+        {
+            sd_append_file(uploadPath.c_str(), upload.buf, upload.currentSize);
+        }
+    }
+    else if (upload.status == UPLOAD_FILE_END)
+    {
+        LOG_I("[API] SD upload complete: %s\n", uploadPath.c_str());
+        sd_refresh_stats();
+        // Return JSON response after upload complete
+        WS->send(200, "application/json", "{\"ok\":true,\"path\":\"" + uploadPath + "\"}");
+        uploadPath = "";
+        if (upload_exclusive) { sd_end_exclusive(); upload_exclusive = false; }
+    }
+    else if (upload.status == UPLOAD_FILE_ABORTED)
+    {
+        LOG_E("[API] SD upload aborted\n");
+        // Clean up partial file
+        if (uploadPath.length() > 0 && sd_file_exists(uploadPath.c_str()))
+            sd_remove_file(uploadPath.c_str());
+        uploadPath = "";
+        if (upload_exclusive) { sd_end_exclusive(); upload_exclusive = false; }
+    }
+}
+
 // ─── Full Config Export API ──────────────────────────────────
 // GET /api/export — dumps ALL NVRAM config as JSON (for backup)
 static void handleApiLan()
@@ -2379,7 +2907,144 @@ static void handleApiLan()
     WS->send(200, "application/json", payload);
 }
 
-// ─── Config Backup / Restore ──────────────────────────────────
+// ─── W5500 Diagnostics API ─────────────────────────────────
+// GET /api/diag — comprehensive W5500 + SD diagnostics
+static void handleApiSdTest()
+{
+    if (!web_auth_ok()) return;
+#ifdef USE_SD
+    String result = sd_test_init();
+    WS->send(200, "application/json", result);
+#else
+    WS->send(200, "application/json", "{\"error\":\"SD not compiled\"}");
+#endif
+}
+
+static void handleApiDiag()
+{
+    if (!web_auth_ok())
+        return;
+    JsonDocument doc(PsramAllocator::instance());
+
+    // ── System ──
+    doc["fw"] = "2.8.0";
+    doc["uptime_s"] = millis() / 1000;
+    doc["heap_free"] = ESP.getFreeHeap();
+    doc["psram_free"] = ESP.getFreePsram();
+    doc["psram_total"] = ESP.getPsramSize();
+    doc["wdt_reboots"] = wdt_get_reboots();
+
+    // ── WiFi ──
+    doc["wifi_ip"] = WiFi.localIP().toString();
+    doc["wifi_rssi"] = WiFi.RSSI();
+
+    // ── W5500 Config (what firmware THINKS the pins are) ──
+    JsonObject pins = doc.createNestedObject("w5500_pins");
+    pins["mosi"] = cfg.pin_eth_mosi;
+    pins["miso"] = cfg.pin_eth_miso;
+    pins["sclk"] = cfg.pin_eth_sclk;
+    pins["cs"] = cfg.pin_eth_cs;
+    pins["int"] = cfg.pin_eth_int;
+    pins["rst"] = cfg.pin_eth_rst;
+
+    // ── W5500 Runtime status ──
+    doc["lan_enabled"] = cfg.lan_enabled;
+    doc["lan_type"] = cfg.lan_type;
+    doc["lan_dhcp"] = cfg.lan_dhcp;
+    doc["lan_started"] = eth_is_started();
+    doc["lan_connected"] = eth_is_connected();
+
+#ifdef USE_W5500
+    // ── W5500 Hardware Status ──
+    int hw = Ethernet.hardwareStatus();
+    switch (hw)
+    {
+    case EthernetNoHardware: doc["hw_status"] = "NO_HARDWARE"; break;
+    case EthernetW5100:      doc["hw_status"] = "W5100"; break;
+    case EthernetW5200:      doc["hw_status"] = "W5200"; break;
+    case EthernetW5500:      doc["hw_status"] = "W5500"; break;
+    default:                 doc["hw_status"] = hw; break;
+    }
+    doc["hw_raw"] = hw;
+
+    // ── Link Status ──
+    int lnk = Ethernet.linkStatus();
+    switch (lnk)
+    {
+    case LinkON:  doc["link_status"] = "ON"; break;
+    case LinkOFF: doc["link_status"] = "OFF"; break;
+    default:      doc["link_status"] = "UNKNOWN"; break;
+    }
+    doc["link_raw"] = lnk;
+
+    // ── IP from W5500 ──
+    doc["eth_ip"] = Ethernet.localIP().toString();
+    doc["eth_subnet"] = Ethernet.subnetMask().toString();
+    doc["eth_gw"] = Ethernet.gatewayIP().toString();
+    doc["eth_dns"] = Ethernet.dnsServerIP().toString();
+    // MAC not accessible (static in eth_handler) — read from Ethernet lib
+    byte mac[6];
+    Ethernet.MACAddress(mac);
+    char mac_str[18];
+    snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    doc["eth_mac"] = mac_str;
+
+    // ── SPI bus test: read W5500 version register ──
+    // W5500 version register at 0x0000_0039 should return 0x51
+    // We test by reading hardwareStatus which does SPI internally
+    doc["spi_responsive"] = (hw != EthernetNoHardware);
+
+    // ── GPIO sanity check ──
+    if (cfg.pin_eth_cs >= 0)
+    {
+        doc["cs_gpio_read"] = digitalRead(cfg.pin_eth_cs);
+    }
+    if (cfg.pin_eth_rst >= 0)
+    {
+        doc["rst_gpio_level"] = digitalRead(cfg.pin_eth_rst);
+    }
+    if (cfg.pin_eth_int >= 0)
+    {
+        doc["int_gpio_read"] = digitalRead(cfg.pin_eth_int);
+    }
+#else
+    doc["hw_status"] = "USE_W5500_NOTCompiled";
+#endif
+
+    // ── SD Card ──
+    JsonObject sd = doc.createNestedObject("sd");
+    sd["enabled"] = cfg.sd_enabled;
+    sd["ok"] = sd_is_ok();
+    sd["pin_conflict"] = sd_has_pin_conflict();
+    sd["exclusive_mode"] = sd_is_exclusive();
+    if (sd_has_pin_conflict())
+    {
+        sd["conflict_msg"] = "SD CS és RS485 DE ugyanazon a GPIO-n!";
+    }
+    if (sd_is_ok())
+    {
+        sd["type"] = sd_type_str();
+        sd["total_kb"] = sd_total_kb();
+        sd["used_kb"] = sd_used_kb();
+    }
+
+    // ── Modbus state ──
+    doc["modbus_paused"] = modbus_is_paused();
+    doc["register_count"] = register_count;
+
+    // ── DHCP config ──
+    JsonObject dhcp = doc.createNestedObject("dhcp_config");
+    dhcp["enabled"] = cfg.lan_dhcp;
+    dhcp["static_ip"] = cfg.lan_ip;
+    dhcp["gw"] = cfg.lan_gw;
+    dhcp["mask"] = cfg.lan_mask;
+    dhcp["dns"] = cfg.lan_dns;
+
+    String payload;
+    serializeJson(doc, payload);
+    WS->send(200, "application/json", payload);
+}
 // Backup: reads ALL NVRAM keys → JSON (includes passwords, per-module names, rooms)
 // Restore: POST JSON → writes NVRAM keys → reboot
 
@@ -2586,7 +3251,7 @@ static void handleApiRestore()
     LOG_I("[RESTORE] %d keys written, rebooting...\n", written);
     WS->send(200, "application/json", "{\"ok\":true,\"keys\":" + String(written) + ",\"action\":\"reboot\"}");
     delay(3000);
-    ESP.restart();
+    eth_hard_reset_and_restart();
 }
 
 // ─── Init & Loop ───────────────────────────────────────────────
@@ -2740,6 +3405,358 @@ static void handleSaveAdmin()
     WS->send(400, "text/html", "Bad request");
 }
 
+// ─── Helper: RegHAClass → Hungarian label ───────────────────────
+static const char *haClassLabel(uint8_t cls)
+{
+    switch (cls)
+    {
+    case HAC_SENSOR:      return "Szenzor";
+    case HAC_TEMPERATURE: return "Hőmérséklet";
+    case HAC_HUMIDITY:    return "Páratartalom";
+    case HAC_POWER:       return "Teljesítmény";
+    case HAC_ENERGY:      return "Energia";
+    case HAC_PRESSURE:    return "Nyomás";
+    case HAC_VOLTAGE:     return "Feszültség";
+    case HAC_CURRENT:     return "Áram";
+    case HAC_FREQUENCY:   return "Frekvencia";
+    case HAC_COP:         return "COP";
+    default:              return "?";
+    }
+}
+
+// ─── REGISTER CONFIG PAGE ────────────────────────────────────────
+static void handleRegisters()
+{
+    if (!web_auth_ok())
+        return;
+    String html;
+    html.reserve(8000);
+    String authSfx = WS->hasArg("auth") ? ("?auth=" + WS->arg("auth")) : String();
+
+    html = pageStart(F("Modbus-MQTT Bridge — Regiszterek"), CSS_REGISTERS) + FPSTR(CSS_FORMS) + pageStyleEnd();
+
+    html += F("<h1>&#128202; Regiszterek</h1>");
+    html += navHtml(PG_REGISTERS, authSfx);
+
+    html += F("<p class=\"note\">Modbus FC03/FC04 regiszterek olvasása és MQTT + Home Assistant automatikus közzététele. "
+              "Max 32 regiszter konfigurálható.</p>");
+
+    // ── Add new register form (inline) ──
+    html += F("<div class=\"add-form\">");
+    html += F("<h3>&#10133; Új regiszter hozzáadása</h3>");
+    html += F("<div class=\"row\">");
+    html += F("<div class=\"fm fm-sm\"><label>Cím</label><input id=\"r_addr\" type=\"number\" min=\"0\" max=\"65535\" placeholder=\"0\"></div>");
+    html += F("<div class=\"fm fm-sm\"><label>Típus</label><select id=\"r_type\">"
+              "<option value=\"3\">FC03 (Holding)</option>"
+              "<option value=\"4\">FC04 (Input)</option>"
+              "</select></div>");
+    html += F("<div class=\"fm fm-sm\"><label>Slave</label><input id=\"r_slave\" type=\"number\" min=\"1\" max=\"247\" value=\"1\"></div>");
+    html += F("<div class=\"fm fm-sm\"><label>HA Osztály</label><select id=\"r_class\">"
+              "<option value=\"0\">Szenzor</option>"
+              "<option value=\"1\">Hőmérséklet</option>"
+              "<option value=\"2\">Páratartalom</option>"
+              "<option value=\"3\">Teljesítmény</option>"
+              "<option value=\"4\">Energia</option>"
+              "<option value=\"5\">Nyomás</option>"
+              "<option value=\"6\">Feszültség</option>"
+              "<option value=\"7\">Áram</option>"
+              "<option value=\"8\">Frekvencia</option>"
+              "<option value=\"9\">COP</option>"
+              "</select></div>");
+    html += F("<div class=\"fm fm-sm\"><label>Scale</label><input id=\"r_scale\" type=\"number\" min=\"1\" max=\"65535\" value=\"1\"></div>");
+    html += F("<div class=\"fm fm-lg\"><label>Név</label><input id=\"r_name\" maxlength=\"23\" placeholder=\"Hőmérséklet\"></div>");
+    html += F("<div class=\"fm fm-sm\"><label>Egység</label><input id=\"r_unit\" maxlength=\"7\" placeholder=\"°C\"></div>");
+    html += F("</div>");
+    html += F("<button class=\"btn-add\" onclick=\"addRegister()\">&#10133; Hozzáadás</button>");
+    html += F("</div>");
+
+    // ── Register table ──
+    html += F("<div class=\"card\">");
+    html += F("<table class=\"rtbl\">");
+    html += F("<tr><th>#</th><th>Cím</th><th>Típus</th><th>HA Osztály</th>"
+              "<th>Slave</th><th>Scale</th><th>Név</th><th>Egység</th>"
+              "<th>Engedélyezve</th><th>Érték</th><th>Műveletek</th></tr>");
+
+    if (register_count == 0)
+    {
+        html += F("<tr><td colspan=\"11\" style=\"text-align:center;color:#8b949e;padding:12px\">"
+                  "Nincs regiszter konfigurálva</td></tr>");
+    }
+
+    for (uint8_t i = 0; i < register_count; i++)
+    {
+        RegisterConfig &r = registers[i];
+        String en_cls = r.enabled ? "on" : "off";
+        String en_txt = r.enabled ? "BE" : "KI";
+
+        html += "<tr id=\"reg_row_" + String(i) + "\">";
+        html += "<td>" + String(i) + "</td>";
+        html += "<td>" + String(r.addr) + "</td>";
+        html += "<td>FC0" + String(r.reg_type) + "</td>";
+        html += "<td>" + String(haClassLabel(r.ha_class)) + "</td>";
+        html += "<td>S" + String(r.slave_addr) + "</td>";
+        html += "<td>" + String(r.scale) + "</td>";
+        html += "<td>" + htmlEscape(r.name) + "</td>";
+        html += "<td>" + htmlEscape(r.unit) + "</td>";
+        html += "<td><span class=\"badge " + en_cls + "\" id=\"reg_en_" + String(i) + "\">" + en_txt + "</span></td>";
+
+        // Value display
+        if (r.published)
+        {
+            char vbuf[16];
+            if (r.scale > 1)
+                snprintf(vbuf, sizeof(vbuf), "%.2f", r.last_value / (float)r.scale);
+            else
+                snprintf(vbuf, sizeof(vbuf), "%.0f", r.last_value);
+            html += "<td class=\"val\">" + String(vbuf) + "</td>";
+        }
+        else
+        {
+            html += "<td style=\"color:#484f58\">—</td>";
+        }
+
+        // Action buttons
+        html += "<td>";
+        html += "<button class=\"btn-sm btn-tog\" onclick=\"toggleRegister(" + String(i) + ")\">&#128260;</button> ";
+        html += "<button class=\"btn-sm btn-del\" onclick=\"deleteRegister(" + String(i) + ")\">&#128465;</button>";
+        html += "</td>";
+        html += "</tr>";
+    }
+
+    html += F("</table></div>");
+
+    html += pageFoot();
+
+    // JavaScript for AJAX operations
+    html += R"rawliteral(<script>
+var _auth=(location.search.match(/auth=([^&]+)/)||[])[1]||'';
+function apiPost(url,cb){
+  if(_auth)url+=(url.indexOf('?')<0?'?':'&')+'auth='+_auth;
+  fetch(url,{method:'POST'}).then(r=>r.json()).then(cb).catch(e=>{alert('Hálózati hiba');});
+}
+function addRegister(){
+  var a=document.getElementById('r_addr').value;
+  var t=document.getElementById('r_type').value;
+  var s=document.getElementById('r_slave').value;
+  var c=document.getElementById('r_class').value;
+  var sc=document.getElementById('r_scale').value;
+  var n=document.getElementById('r_name').value;
+  var u=document.getElementById('r_unit').value;
+  if(!a){alert('Cím megadása kötelező');return;}
+  var url='/api/register/add?addr='+a+'&type='+t+'&slave='+s+'&class='+c+'&scale='+sc+'&name='+encodeURIComponent(n)+'&unit='+encodeURIComponent(u)+'&enabled=1';
+  apiPost(url,function(d){
+    if(d.ok){location.reload();}
+    else{alert('Hiba: '+(d.error||'ismeretlen'));}
+  });
+}
+function deleteRegister(idx){
+  if(!confirm('Biztosan törlöd a regisztert #'+idx+'?'))return;
+  apiPost('/api/register/delete?index='+idx,function(d){
+    if(d.ok){location.reload();}
+    else{alert('Hiba: '+(d.error||'ismeretlen'));}
+  });
+}
+function toggleRegister(idx){
+  apiPost('/api/register/toggle?index='+idx,function(d){
+    if(d.ok){location.reload();}
+    else{alert('Hiba: '+(d.error||'ismeretlen'));}
+  });
+}
+</script></body></html>)rawliteral";
+
+    WS->send(200, "text/html", html);
+}
+
+// ─── API: GET /api/registers ──────────────────────────────────────
+static void handleApiRegisters()
+{
+    if (!web_auth_ok())
+        return;
+    JsonDocument doc(PsramAllocator::instance());
+    JsonArray arr = doc.to<JsonArray>();
+    for (uint8_t i = 0; i < register_count; i++)
+    {
+        RegisterConfig &r = registers[i];
+        JsonObject obj = arr.add<JsonObject>();
+        obj["index"] = i;
+        obj["addr"] = r.addr;
+        obj["type"] = (uint8_t)r.reg_type;
+        obj["ha_class"] = (uint8_t)r.ha_class;
+        obj["ha_class_label"] = haClassLabel(r.ha_class);
+        obj["slave"] = r.slave_addr;
+        obj["scale"] = r.scale;
+        obj["name"] = r.name;
+        obj["unit"] = r.unit;
+        obj["enabled"] = r.enabled;
+        obj["last_value"] = r.last_value;
+        obj["published"] = r.published;
+    }
+    String payload;
+    serializeJson(doc, payload);
+    WS->send(200, "application/json", payload);
+}
+
+// ─── API: POST /api/register/add ──────────────────────────────────
+static void handleApiRegisterAdd()
+{
+    if (!web_auth_ok())
+        return;
+    if (register_count >= MAX_REGISTERS)
+    {
+        WS->send(400, "application/json", "{\"ok\":false,\"error\":\"max registers reached\"}");
+        return;
+    }
+    if (!WS->hasArg("addr"))
+    {
+        WS->send(400, "application/json", "{\"ok\":false,\"error\":\"missing addr\"}");
+        return;
+    }
+
+    RegisterConfig &r = registers[register_count];
+    memset(&r, 0, sizeof(RegisterConfig));
+
+    r.addr = (uint16_t)WS->arg("addr").toInt();
+    r.reg_type = WS->hasArg("type") ? (RegType)WS->arg("type").toInt() : REG_HOLDING;
+    if (r.reg_type != REG_INPUT)
+        r.reg_type = REG_HOLDING;
+    r.slave_addr = WS->hasArg("slave") ? (uint8_t)WS->arg("slave").toInt() : 1;
+    r.ha_class = WS->hasArg("class") ? (RegHAClass)WS->arg("class").toInt() : HAC_SENSOR;
+    r.scale = WS->hasArg("scale") ? (uint16_t)WS->arg("scale").toInt() : 1;
+    if (r.scale == 0) r.scale = 1;
+    strlcpy(r.name, WS->hasArg("name") ? WS->arg("name").c_str() : "", sizeof(r.name));
+    strlcpy(r.unit, WS->hasArg("unit") ? WS->arg("unit").c_str() : "", sizeof(r.unit));
+    r.enabled = WS->hasArg("enabled") ? (WS->arg("enabled") == "1") : true;
+
+    // Runtime fields
+    r.last_value = 0;
+    r.published = false;
+    r.last_read_ms = 0;
+
+    register_count++;
+    config_save_registers();
+
+    // Publish HA discovery immediately so the entity appears in HA
+    if (mqtt_is_connected())
+        mqtt_publish_register_discovery(&registers[register_count - 1]);
+
+    LOG_I("[REG] Added register #%u: addr=%u type=FC0%u slave=S%u class=%s name=%s\n",
+          register_count - 1, r.addr, r.reg_type, r.slave_addr, haClassLabel(r.ha_class), r.name);
+
+    WS->send(200, "application/json", "{\"ok\":true,\"index\":" + String(register_count - 1) + "}");
+}
+
+// ─── API: POST /api/register/edit ─────────────────────────────────
+static void handleApiRegisterEdit()
+{
+    if (!web_auth_ok())
+        return;
+    if (!WS->hasArg("index"))
+    {
+        WS->send(400, "application/json", "{\"ok\":false,\"error\":\"missing index\"}");
+        return;
+    }
+    uint8_t idx = (uint8_t)WS->arg("index").toInt();
+    if (idx >= register_count)
+    {
+        WS->send(400, "application/json", "{\"ok\":false,\"error\":\"invalid index\"}");
+        return;
+    }
+
+    RegisterConfig &r = registers[idx];
+    if (WS->hasArg("addr"))
+        r.addr = (uint16_t)WS->arg("addr").toInt();
+    if (WS->hasArg("type"))
+    {
+        uint8_t t = (uint8_t)WS->arg("type").toInt();
+        r.reg_type = (t == REG_INPUT) ? REG_INPUT : REG_HOLDING;
+    }
+    if (WS->hasArg("slave"))
+        r.slave_addr = (uint8_t)WS->arg("slave").toInt();
+    if (WS->hasArg("class"))
+        r.ha_class = (RegHAClass)WS->arg("class").toInt();
+    if (WS->hasArg("scale"))
+    {
+        uint16_t s = (uint16_t)WS->arg("scale").toInt();
+        r.scale = (s > 0) ? s : 1;
+    }
+    if (WS->hasArg("name"))
+        strlcpy(r.name, WS->arg("name").c_str(), sizeof(r.name));
+    if (WS->hasArg("unit"))
+        strlcpy(r.unit, WS->arg("unit").c_str(), sizeof(r.unit));
+    if (WS->hasArg("enabled"))
+        r.enabled = (WS->arg("enabled") == "1");
+
+    config_save_registers();
+
+    LOG_I("[REG] Edited register #%u: addr=%u type=FC0%u slave=S%u\n",
+          idx, r.addr, r.reg_type, r.slave_addr);
+
+    WS->send(200, "application/json", "{\"ok\":true,\"index\":" + String(idx) + "}");
+}
+
+// ─── API: POST /api/register/delete ───────────────────────────────
+static void handleApiRegisterDelete()
+{
+    if (!web_auth_ok())
+        return;
+    if (!WS->hasArg("index"))
+    {
+        WS->send(400, "application/json", "{\"ok\":false,\"error\":\"missing index\"}");
+        return;
+    }
+    uint8_t idx = (uint8_t)WS->arg("index").toInt();
+    if (idx >= register_count)
+    {
+        WS->send(400, "application/json", "{\"ok\":false,\"error\":\"invalid index\"}");
+        return;
+    }
+
+    LOG_I("[REG] Deleting register #%u: addr=%u name=%s\n",
+          idx, registers[idx].addr, registers[idx].name);
+
+    // Shift remaining registers down
+    for (uint8_t i = idx; i < register_count - 1; i++)
+    {
+        registers[i] = registers[i + 1];
+    }
+    register_count--;
+
+    // Clear last slot
+    memset(&registers[register_count], 0, sizeof(RegisterConfig));
+
+    config_save_registers();
+
+    WS->send(200, "application/json", "{\"ok\":true}");
+}
+
+// ─── API: POST /api/register/toggle ───────────────────────────────
+static void handleApiRegisterToggle()
+{
+    if (!web_auth_ok())
+        return;
+    if (!WS->hasArg("index"))
+    {
+        WS->send(400, "application/json", "{\"ok\":false,\"error\":\"missing index\"}");
+        return;
+    }
+    uint8_t idx = (uint8_t)WS->arg("index").toInt();
+    if (idx >= register_count)
+    {
+        WS->send(400, "application/json", "{\"ok\":false,\"error\":\"invalid index\"}");
+        return;
+    }
+
+    registers[idx].enabled = !registers[idx].enabled;
+    config_save_registers();
+
+    LOG_I("[REG] Toggled register #%u: enabled=%s\n",
+          idx, registers[idx].enabled ? "true" : "false");
+
+    String resp = "{\"ok\":true,\"index\":" + String(idx) +
+                  ",\"enabled\":" + String(registers[idx].enabled ? "true" : "false") + "}";
+    WS->send(200, "application/json", resp);
+}
+
 void web_server_init()
 {
     web.on("/", HTTP_GET, handleStatus);
@@ -2747,6 +3764,7 @@ void web_server_init()
     web.on("/config", HTTP_GET, handleConfig);
     web.on("/pins", HTTP_GET, handlePins);
     web.on("/modules", HTTP_GET, handleModules);
+    web.on("/registers", HTTP_GET, handleRegisters);
     web.on("/admin", HTTP_GET, handleAdmin);
     web.on("/saveadmin", HTTP_POST, handleSaveAdmin);
     web.on("/ota", HTTP_GET, handleOtaPage);
@@ -2776,12 +3794,30 @@ void web_server_init()
     web.on("/api/modules", HTTP_GET, handleApiModules);
     web.on("/api/direlay", HTTP_POST, handleApiDiRelay);
     web.on("/api/diedge", HTTP_POST, handleApiDiEdge);
+    // ── Register config API ──────────────────────────────────
+    web.on("/api/registers", HTTP_GET, handleApiRegisters);
+    web.on("/api/register/add", HTTP_POST, handleApiRegisterAdd);
+    web.on("/api/register/edit", HTTP_POST, handleApiRegisterEdit);
+    web.on("/api/register/delete", HTTP_POST, handleApiRegisterDelete);
+    web.on("/api/register/toggle", HTTP_POST, handleApiRegisterToggle);
     web.on("/api/sd/save", HTTP_POST, handleApiSdSave);
     web.on("/api/sd/list", HTTP_GET, handleApiSdList);
     web.on("/api/sd/read", HTTP_GET, handleApiSdRead);
     web.on("/api/sd/del", HTTP_DELETE, handleApiSdDel);
     web.on("/api/sd/toggle", HTTP_POST, handleApiSdToggle);
+    // ── SD Card browser page & API ──────────────────────────
+    web.on("/sd", HTTP_GET, handleSdCard);
+    web.on("/api/sd/browse", HTTP_GET, handleApiSdBrowse);
+    web.on("/api/sd/view", HTTP_GET, handleApiSdView);
+    web.on("/api/sd/remove", HTTP_POST, handleApiSdRemove);
+    web.on("/api/sd/mkdir", HTTP_POST, handleApiSdMkdir);
+    web.on("/api/sd/format", HTTP_POST, handleApiSdFormat);
+    web.on("/api/sd/upload", HTTP_POST, handleApiSdUpload, handleApiSdUpload);
     web.on("/api/lan", HTTP_GET, handleApiLan);
+    web.on("/api/diag", HTTP_GET, handleApiDiag);
+#ifdef USE_SD
+    web.on("/api/sd/test", HTTP_GET, handleApiSdTest);
+#endif
     web.begin();
     LOG_ILN("[WEB] Status & Config server started on port 80");
 
@@ -2791,6 +3827,7 @@ void web_server_init()
     ethWeb.on("/config", ETH_HTTP_GET, handleConfig);
     ethWeb.on("/pins", ETH_HTTP_GET, handlePins);
     ethWeb.on("/modules", ETH_HTTP_GET, handleModules);
+    ethWeb.on("/registers", ETH_HTTP_GET, handleRegisters);
     ethWeb.on("/admin", ETH_HTTP_GET, handleAdmin);
     ethWeb.on("/ota", ETH_HTTP_GET, handleOtaPage);
     ethWeb.on("/otaurl", ETH_HTTP_GET, handleOtaFromURL);
@@ -2813,12 +3850,30 @@ void web_server_init()
     ethWeb.on("/api/modules", ETH_HTTP_GET, handleApiModules);
     ethWeb.on("/api/direlay", ETH_HTTP_POST, handleApiDiRelay);
     ethWeb.on("/api/diedge", ETH_HTTP_POST, handleApiDiEdge);
+    // ── Register config API (LAN) ────────────────────────────
+    ethWeb.on("/api/registers", ETH_HTTP_GET, handleApiRegisters);
+    ethWeb.on("/api/register/add", ETH_HTTP_POST, handleApiRegisterAdd);
+    ethWeb.on("/api/register/edit", ETH_HTTP_POST, handleApiRegisterEdit);
+    ethWeb.on("/api/register/delete", ETH_HTTP_POST, handleApiRegisterDelete);
+    ethWeb.on("/api/register/toggle", ETH_HTTP_POST, handleApiRegisterToggle);
     ethWeb.on("/api/sd/save", ETH_HTTP_POST, handleApiSdSave);
     ethWeb.on("/api/sd/list", ETH_HTTP_GET, handleApiSdList);
     ethWeb.on("/api/sd/read", ETH_HTTP_GET, handleApiSdRead);
     ethWeb.on("/api/sd/del", ETH_HTTP_POST, handleApiSdDel); // POST (ETH server has no HTTP_DELETE)
     ethWeb.on("/api/sd/toggle", ETH_HTTP_POST, handleApiSdToggle);
+    // ── SD Card browser page & API (LAN) ──────────────────
+    ethWeb.on("/sd", ETH_HTTP_GET, handleSdCard);
+    ethWeb.on("/api/sd/browse", ETH_HTTP_GET, handleApiSdBrowse);
+    ethWeb.on("/api/sd/view", ETH_HTTP_GET, handleApiSdView);
+    ethWeb.on("/api/sd/remove", ETH_HTTP_POST, handleApiSdRemove);
+    ethWeb.on("/api/sd/mkdir", ETH_HTTP_POST, handleApiSdMkdir);
+    ethWeb.on("/api/sd/format", ETH_HTTP_POST, handleApiSdFormat);
+    ethWeb.on("/api/sd/upload", ETH_HTTP_POST, handleApiSdUpload);
     ethWeb.on("/api/lan", ETH_HTTP_GET, handleApiLan);
+    ethWeb.on("/api/diag", ETH_HTTP_GET, handleApiDiag);
+#ifdef USE_SD
+    ethWeb.on("/api/sd/test", ETH_HTTP_GET, handleApiSdTest);
+#endif
     ethWeb.on("/api/backup", ETH_HTTP_GET, handleApiBackup);
     ethWeb.on("/api/restore", ETH_HTTP_POST, handleApiRestore);
     ethWeb.on("/api/export", ETH_HTTP_GET, handleApiBackup);

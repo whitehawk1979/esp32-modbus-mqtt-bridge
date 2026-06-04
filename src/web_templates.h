@@ -23,8 +23,10 @@ enum WebPage
     PG_CONFIG,
     PG_PINS,
     PG_MODULES,
+    PG_REGISTERS,
     PG_OTA,
-    PG_ADMIN
+    PG_ADMIN,
+    PG_SD
 };
 
 // ─── Shared Base CSS (used by every page) ─────────────────────
@@ -96,6 +98,77 @@ static const char CSS_MODULES[] PROGMEM = R"rawliteral(
 .mrow-wrap{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0}
 )rawliteral";
 
+// ─── Register Config page extra CSS ──────────────────────────────
+static const char CSS_REGISTERS[] PROGMEM = R"rawliteral(
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px;margin:6px 0}
+.row{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #21262d}
+.row:last-child{border:none}
+.key{color:#8b949e}.val{color:#c9d1d9;font-weight:600}
+.on{color:#3fb950}.off{color:#f85149}
+.rtbl{width:100%;border-collapse:collapse;margin:8px 0;font-size:13px}
+.rtbl th{text-align:left;color:#8b949e;font-weight:600;padding:6px 8px;border-bottom:1px solid #30363d;white-space:nowrap}
+.rtbl td{padding:5px 8px;border-bottom:1px solid #21262d;vertical-align:middle}
+.rtbl tr:hover{background:#161b22}
+.rtbl input,.rtbl select{width:100%;padding:4px 6px;border:1px solid #30363d;border-radius:4px;background:#0d1117;color:#c9d1d9;font-size:13px}
+.rtbl input:focus,.rtbl select:focus{outline:none;border-color:#58a6ff}
+.rtbl .sm{width:60px}
+.rtbl .md{width:90px}
+.rtbl .lg{width:140px}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:12px;margin:2px}
+.badge.on{background:#238636;color:white}
+.badge.off{background:#f851494d;color:#f85149}
+.btn-sm{padding:4px 10px;font-size:12px;border:none;border-radius:4px;cursor:pointer;margin:1px}
+.btn-sm:hover{opacity:0.85}
+.btn-add{background:#238636;color:white}
+.btn-del{background:#da3633;color:white}
+.btn-edit{background:#1f6feb;color:white}
+.btn-tog{background:#f0883e;color:white}
+.add-form{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px;margin:10px 0}
+.add-form h3{color:#58a6ff;margin:0 0 8px;font-size:14px}
+)rawliteral";
+
+// ─── SD Card page extra CSS ─────────────────────────────────────
+static const char CSS_SD[] PROGMEM = R"rawliteral(
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px;margin:6px 0}
+.row{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #21262d}
+.row:last-child{border:none}
+.key{color:#8b949e}.val{color:#c9d1d9;font-weight:600}
+.on{color:#3fb950}.off{color:#f85149}
+.sd-exclusive-banner{background:#3d2800;border:1px solid #f0883e;border-radius:8px;padding:10px 14px;margin:8px 0;color:#f0883e;font-size:14px;text-align:center}
+.sd-init-fail{background:#3d0a0a;border:1px solid #f85149;border-radius:8px;padding:10px 14px;margin:8px 0;color:#f85149;font-size:14px;text-align:center}
+.sd-actions{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+.sd-actions button{font-size:14px;padding:8px 14px}
+.btn-del{background:#da3633}.btn-del:hover{background:#f85149}
+.btn-warn{background:#f0883e}.btn-warn:hover{background:#d29922}
+.file-list{margin:8px 0}
+.file-entry{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;margin:4px 0;background:#161b22;border:1px solid #30363d;border-radius:6px}
+.file-entry:hover{border-color:#58a6ff}
+.file-info{display:flex;align-items:center;gap:8px;flex:1;min-width:0}
+.file-name{color:#58a6ff;cursor:pointer;text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.file-name:hover{text-decoration:underline}
+.file-size{color:#8b949e;font-size:12px;white-space:nowrap}
+.file-actions{display:flex;gap:6px;flex-shrink:0}
+.file-actions button{font-size:12px;padding:4px 10px}
+.dir-icon{color:#f0883e}
+.file-icon{color:#8b949e}
+.breadcrumb{display:flex;gap:4px;align-items:center;margin:8px 0;flex-wrap:wrap}
+.breadcrumb a{color:#58a6ff;text-decoration:none}.breadcrumb a:hover{text-decoration:underline}
+.breadcrumb span{color:#484f58}
+.upload-area{background:#161b22;border:2px dashed #30363d;border-radius:8px;padding:16px;margin:8px 0;text-align:center}
+.upload-area:hover{border-color:#58a6ff}
+.modal-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:100;justify-content:center;align-items:center}
+.modal-overlay.active{display:flex}
+.modal{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;max-width:90vw;max-height:80vh;overflow:auto;min-width:300px}
+.modal pre{background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:12px;overflow:auto;max-height:60vh;color:#c9d1d9;font-size:13px;white-space:pre-wrap;word-break:break-all}
+.modal-close{float:right;background:none;border:none;color:#8b949e;font-size:20px;cursor:pointer}
+.modal-close:hover{color:#f85149}
+.confirm-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:200;justify-content:center;align-items:center}
+.confirm-overlay.active{display:flex}
+.confirm-box{background:#161b22;border:1px solid #f0883e;border-radius:8px;padding:16px;text-align:center;min-width:280px}
+.confirm-box p{margin:8px 0;color:#c9d1d9}
+.confirm-box .btn-row{display:flex;gap:8px;justify-content:center;margin-top:12px}
+)rawliteral";
+
 // ─── Admin page extra CSS ─────────────────────────────────────
 // Defined inline if needed; placeholder for future extraction
 
@@ -133,8 +206,10 @@ static String navHtml(WebPage active, const String &authSuffix = "")
         {"Beállítások", "/config", PG_CONFIG},
         {"Pinek", "/pins", PG_PINS},
         {"Modulok", "/modules", PG_MODULES},
+        {"Regiszterek", "/registers", PG_REGISTERS},
         {"OTA", "/ota", PG_OTA},
         {"Admin", "/admin", PG_ADMIN},
+        {"SD Kártya", "/sd", PG_SD},
     };
 
     for (auto &it : items)

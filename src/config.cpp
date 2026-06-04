@@ -68,9 +68,10 @@ static void cfg_defaults()
     cfg.pin_eth_cs = 14;
     cfg.pin_eth_int = 10;
     cfg.pin_eth_rst = 9;
-    // ── SD Card (shares FSPI bus with W5500) ──
+    // ── SD Card (separate SPI bus — NOT shared with W5500!) ──
+    // Waveshare ESP32-S3-ETH V1.0: SD on SPI2/HSPI (MOSI=6,MISO=5,SCLK=7,CS=4)
     cfg.sd_enabled = false; // Off by default — enable via web UI
-    cfg.pin_sd_cs = 42;
+    cfg.pin_sd_cs = 4;
     // ── Hostname + Auth ──
     strlcpy(cfg.hostname, "modbusmqtt", sizeof(cfg.hostname));
     cfg.web_auth = true;
@@ -384,7 +385,7 @@ static void factory_provision(Preferences &nv)
     }
     if (!nv.isKey(NV_KEY_PIN_SD_CS))
     {
-        nv.putInt(NV_KEY_PIN_SD_CS, 42);
+        nv.putInt(NV_KEY_PIN_SD_CS, 4);
         dirty = true;
     }
 
@@ -457,7 +458,7 @@ void config_load()
     cfg.pin_eth_rst = (int8_t)nv.getInt(NV_KEY_PIN_ETH_RST, 9);
     // SD Card
     cfg.sd_enabled = nv.getBool(NV_KEY_SD_EN, false);
-    cfg.pin_sd_cs = (int8_t)nv.getInt(NV_KEY_PIN_SD_CS, 42);
+    cfg.pin_sd_cs = (int8_t)nv.getInt(NV_KEY_PIN_SD_CS, 4);
     nv.getString(NV_KEY_HOSTNAME, cfg.hostname, sizeof(cfg.hostname));
 
     cfg.web_auth = nv.getBool(NV_KEY_WEB_AUTH, true);
@@ -970,7 +971,7 @@ void config_start_portal()
         config_save();
         portal.send_P(200, "text/html", SAVED_HTML);
         delay(2000);
-        ESP.restart();
+        eth_hard_reset_and_restart();
     });
 
     portal.begin();
@@ -987,7 +988,7 @@ void config_start_portal()
 
     portal_active = false;
     LOG_ILN("[PORTAL] Timeout, restarting...");
-    ESP.restart();
+    eth_hard_reset_and_restart();
 }
 
 // ─── Config Integrity: CRC32 + Version ──────────────────────────
@@ -1062,6 +1063,34 @@ uint32_t config_compute_crc()
         crc = crc32_update(crc, (const uint8_t *)&val, sizeof(val));
     }
 
+    // Register count
+    {
+        uint8_t rc = nv.getUChar(NV_KEY_REG_COUNT, 0);
+        crc = crc32_update(crc, (const uint8_t *)NV_KEY_REG_COUNT, strlen(NV_KEY_REG_COUNT));
+        crc = crc32_update(crc, (const uint8_t *)&rc, sizeof(rc));
+    }
+
+    // Register binary blobs (persistent fields only: addr, reg_type, ha_class, slave_addr, scale, name, unit, enabled)
+    {
+        // NVS binary blob size: sizeof persistent part of RegisterConfig
+        // We store: addr(2) + reg_type(1) + ha_class(1) + slave_addr(1) + pad(1) + scale(2) + name(24) + unit(8) + enabled(1) = 41 bytes
+        // Use the struct directly since we pack without runtime fields
+        size_t persist_size = offsetof(RegisterConfig, last_value);
+        for (uint8_t i = 0; i < MAX_REGISTERS; i++)
+        {
+            static char key[8];
+            snprintf(key, sizeof(key), "%s%u", NV_KEY_REG_PREFIX, i);
+            size_t len = nv.getBytesLength(key);
+            if (len > 0 && len <= persist_size)
+            {
+                uint8_t blob[64];
+                nv.getBytes(key, blob, sizeof(blob));
+                crc = crc32_update(crc, (const uint8_t *)key, strlen(key));
+                crc = crc32_update(crc, blob, len);
+            }
+        }
+    }
+
     nv.end();
     return crc ^ 0xFFFFFFFF;
 }
@@ -1117,4 +1146,80 @@ bool config_validate()
 
     LOG_I("[CONFIG] CRC OK (0x%08X)\n", computed);
     return true;
+}
+
+// ─── Register Config Persistence ─────────────────────────────────
+
+// NVS binary blob: persistent part of RegisterConfig (fields before runtime fields)
+// Pack: addr(2) + reg_type(1) + ha_class(1) + slave_addr(1) + pad(1) + scale(2) + name(24) + unit(8) + enabled(1)
+// We use offsetof(RegisterConfig, last_value) as the blob size
+
+void config_load_registers()
+{
+    Preferences nv;
+    nv.begin(NV_NAMESPACE, true); // read-only
+
+    register_count = nv.getUChar(NV_KEY_REG_COUNT, 0);
+    if (register_count > MAX_REGISTERS)
+        register_count = MAX_REGISTERS;
+
+    size_t persist_size = offsetof(RegisterConfig, last_value);
+
+    for (uint8_t i = 0; i < register_count; i++)
+    {
+        memset(&registers[i], 0, sizeof(RegisterConfig));
+        registers[i].enabled = false;
+
+        static char key[8];
+        snprintf(key, sizeof(key), "%s%u", NV_KEY_REG_PREFIX, i);
+        size_t stored_len = nv.getBytesLength(key);
+
+        if (stored_len > 0 && stored_len <= persist_size)
+        {
+            nv.getBytes(key, &registers[i], persist_size);
+        }
+        else
+        {
+            LOG_I("[CONFIG] Register %u: no stored data (len=%u)\n", i, stored_len);
+        }
+
+        // Initialize runtime fields
+        registers[i].last_value = 0;
+        registers[i].published = false;
+        registers[i].last_read_ms = 0;
+    }
+
+    nv.end();
+    LOG_I("[CONFIG] Loaded %u register configs\n", register_count);
+}
+
+void config_save_registers()
+{
+    Preferences nv;
+    nv.begin(NV_NAMESPACE, false); // RW
+
+    nv.putUChar(NV_KEY_REG_COUNT, register_count);
+
+    size_t persist_size = offsetof(RegisterConfig, last_value);
+
+    for (uint8_t i = 0; i < register_count; i++)
+    {
+        static char key[8];
+        snprintf(key, sizeof(key), "%s%u", NV_KEY_REG_PREFIX, i);
+        nv.putBytes(key, &registers[i], persist_size);
+    }
+
+    // Remove any leftover register keys beyond register_count
+    for (uint8_t i = register_count; i < MAX_REGISTERS; i++)
+    {
+        static char key[8];
+        snprintf(key, sizeof(key), "%s%u", NV_KEY_REG_PREFIX, i);
+        nv.remove(key);
+    }
+
+    nv.end();
+
+    // Recompute and write CRC
+    config_write_crc();
+    LOG_I("[CONFIG] Saved %u register configs\n", register_count);
 }

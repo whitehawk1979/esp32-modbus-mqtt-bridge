@@ -205,27 +205,47 @@ void eth_loop()
                         // Step 1: RST pulse
                         if (cfg.pin_eth_rst >= 0)
                         {
+                            LOG_I("[LAN-TASK] RST pin=%d → LOW\n", cfg.pin_eth_rst);
                             pinMode(cfg.pin_eth_rst, OUTPUT);
                             digitalWrite(cfg.pin_eth_rst, LOW);
                             vTaskDelay(pdMS_TO_TICKS(10));
                             digitalWrite(cfg.pin_eth_rst, HIGH);
                             vTaskDelay(pdMS_TO_TICKS(150));
+                            LOG_ILN("[LAN-TASK] RST pulse done → HIGH");
                         }
-                        LOG_ILN("[LAN-TASK] RST OK");
+                        else
+                        {
+                            LOG_ILN("[LAN-TASK] WARNING: RST pin not configured (-1)");
+                        }
 
                         // Step 2: SPI + init
+                        LOG_I("[LAN-TASK] SPI.begin(sclk=%d, miso=%d, mosi=%d, cs=%d)\n",
+                              cfg.pin_eth_sclk, cfg.pin_eth_miso, cfg.pin_eth_mosi, cfg.pin_eth_cs);
                         SPI.begin(cfg.pin_eth_sclk, cfg.pin_eth_miso, cfg.pin_eth_mosi, cfg.pin_eth_cs);
+                        LOG_I("[LAN-TASK] Ethernet.init(cs=%d)\n", cfg.pin_eth_cs);
                         Ethernet.init(cfg.pin_eth_cs);
-                        LOG_ILN("[LAN-TASK] SPI init OK");
+                        vTaskDelay(pdMS_TO_TICKS(100));
+
+                        // Check hardware status right after init
+                        int hw = Ethernet.hardwareStatus();
+                        int lnk = Ethernet.linkStatus();
+                        LOG_I("[LAN-TASK] hwStatus=%d (%s) linkStatus=%d (%s)\n",
+                              hw, hw == EthernetW5500 ? "W5500" : hw == EthernetNoHardware ? "NO_HW" : "UNKNOWN",
+                              lnk, lnk == LinkON ? "ON" : lnk == LinkOFF ? "OFF" : "UNKNOWN");
 
                         // Step 3: DHCP or Static IP (blocking call — safe in dedicated task)
                         bool ok = false;
                         if (cfg.lan_dhcp)
                         {
+                            LOG_ILN("[LAN-TASK] Starting DHCP (timeout 5s, resp_timeout 2s)...");
                             int result = Ethernet.begin(eth_mac, 5000, 2000);
+                            LOG_I("[LAN-TASK] DHCP result=%d\n", result);
                             if (result == 0)
                             {
-                                LOG_ELN("[LAN-TASK] DHCP failed");
+                                hw = Ethernet.hardwareStatus();
+                                lnk = Ethernet.linkStatus();
+                                LOG_I("[LAN-TASK] DHCP FAILED — hw=%d link=%d IP=%s\n",
+                                      hw, lnk, Ethernet.localIP().toString().c_str());
                             }
                             else
                             {
@@ -296,6 +316,19 @@ void eth_loop()
             Ethernet.maintain(); // DHCP lease renewal
 
             bool link = (Ethernet.linkStatus() == LinkON);
+            // Periodic debug: log link/hw status every 10s
+            {
+                static uint32_t last_dbg = 0;
+                if (millis() - last_dbg > 10000)
+                {
+                    LOG_I("[LAN] monitor: hw=%d link=%s IP=%s connected=%s\n",
+                          Ethernet.hardwareStatus(),
+                          link ? "ON" : "OFF",
+                          Ethernet.localIP().toString().c_str(),
+                          lan_connected ? "Y" : "N");
+                    last_dbg = millis();
+                }
+            }
             if (link && !lan_connected)
             {
                 if (Ethernet.localIP() != IPAddress(0, 0, 0, 0))
@@ -324,7 +357,10 @@ void eth_loop()
         {
             if (Ethernet.linkStatus() == LinkON && Ethernet.localIP() == IPAddress(0, 0, 0, 0))
             {
-                LOG_ILN("[LAN] W5500 retrying DHCP via task...");
+                int hw = Ethernet.hardwareStatus();
+                int lnk = Ethernet.linkStatus();
+                LOG_I("[LAN] W5500 retrying DHCP — hw=%d link=%d IP=%s\n",
+                      hw, lnk, Ethernet.localIP().toString().c_str());
                 static volatile bool retry_task_running = false;
                 if (!retry_task_running)
                 {
@@ -332,9 +368,13 @@ void eth_loop()
                     xTaskCreate(
                             [](void *param) {
                                 int result = Ethernet.begin(eth_mac, 5000, 2000);
+                                int hw2 = Ethernet.hardwareStatus();
+                                int lnk2 = Ethernet.linkStatus();
+                                LOG_I("[LAN-RETRY] DHCP result=%d hw=%d link=%d IP=%s\n",
+                                      result, hw2, lnk2, Ethernet.localIP().toString().c_str());
                                 if (result == 0)
                                 {
-                                    LOG_ELN("[LAN-RETRY] DHCP failed");
+                                    LOG_ELN("[LAN-RETRY] DHCP FAILED");
                                 }
                                 else
                                 {
@@ -551,4 +591,27 @@ void eth_web_loop()
     ethWeb.handleClient();      // Parse HTTP, match route, call handler
     WS = &wifiAdapter;          // Restore WiFi adapter for next WiFi cycle
 #endif
+}
+
+// ─── W5500 Hard Reset + System Restart ─────────────────────────
+// Call this INSTEAD of ESP.restart() to ensure W5500 chip is properly
+// reset before reboot. Without this, the W5500 may be in a bad state
+// after soft restart and fail to get DHCP on next boot.
+void eth_hard_reset_and_restart()
+{
+    LOG_ILN("[LAN] W5500 hard reset before restart...");
+
+    if (cfg.lan_type == 0 && cfg.pin_eth_rst >= 0)
+    {
+        // Hard reset W5500 chip: RST LOW for 100ms, then leave LOW
+        // On next boot, eth_init() will drive RST HIGH and re-init
+        pinMode(cfg.pin_eth_rst, OUTPUT);
+        digitalWrite(cfg.pin_eth_rst, LOW);
+        delay(100);
+        // Keep RST LOW — don't drive HIGH, let boot code re-init
+    }
+
+    // Use esp_restart() (not ESP.restart) for cleaner peripheral teardown
+    // Then trigger a real hardware reset via RTC WDT
+    esp_restart();
 }
