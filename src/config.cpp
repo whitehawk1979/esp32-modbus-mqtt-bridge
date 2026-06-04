@@ -68,8 +68,8 @@ static void cfg_defaults()
     cfg.pin_eth_cs = 14;
     cfg.pin_eth_int = 10;
     cfg.pin_eth_rst = 9;
-    // ── SD Card (separate SPI bus — NOT shared with W5500!) ──
-    // Waveshare ESP32-S3-ETH V1.0: SD on SPI2/HSPI (MOSI=6,MISO=5,SCLK=7,CS=4)
+    // ── SD Card (SHARED FSPI bus with W5500!) ──
+    // Waveshare ESP32-S3-ETH V1.0: SD on FSPI (MOSI=11,MISO=12,SCLK=13,CS=4)
     cfg.sd_enabled = false; // Off by default — enable via web UI
     cfg.pin_sd_cs = 4;
     // ── Hostname + Auth ──

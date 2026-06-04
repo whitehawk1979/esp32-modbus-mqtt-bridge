@@ -55,11 +55,14 @@
 #define PIN_ETH_INT 10
 #define PIN_ETH_RST 9
 
-// SD Card (separate SPI bus from W5500!)
-// Waveshare ESP32-S3-ETH V1.0: SD on SPI2 (HSPI), W5500 on FSPI
-#define PIN_SD_MOSI 6
-#define PIN_SD_MISO 5
-#define PIN_SD_SCLK 7
+// SD Card (SAME FSPI bus as W5500 — share MISO/MOSI/SCLK, separate CS)
+// Waveshare ESP32-S3-ETH V1.0: SD on SAME FSPI bus as W5500!
+// Schematic confirms: SD_MOSI=GPIO11, SD_MISO=GPIO12, SD_CLK=GPIO13, SD_CS=GPIO4
+// W5500 uses same FSPI: MOSI=11, MISO=12, SCLK=13, CS=14
+// ⚠️ GPIO4 = SD_CS = RS485 DE (hardver ütközés!)
+#define PIN_SD_MOSI 11
+#define PIN_SD_MISO 12
+#define PIN_SD_SCLK 13
 #define PIN_SD_CS 4
 
 // ─── Modbus Configuration ──────────────────────────────────────

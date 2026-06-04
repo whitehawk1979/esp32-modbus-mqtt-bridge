@@ -1,13 +1,15 @@
 // ─── SD Card Handler ───────────────────────────────────────────
-// SD card on SEPARATE SPI bus from W5500 (Waveshare ESP32-S3-ETH V1.0)
-// W5500 uses FSPI (MOSI=11, MISO=12, SCLK=13, CS=14)
-// SD card uses SPI2 (MOSI=6, MISO=5, SCLK=7, CS=4)
-// No bus collision — separate hardware SPI peripherals.
+// SD card on SAME FSPI bus as W5500 (Waveshare ESP32-S3-ETH V1.0)
+// W5500: MOSI=11, MISO=12, SCLK=13, CS=14 (FSPI)
+// SD:    MOSI=11, MISO=12, SCLK=13, CS=4  (SAME FSPI bus!)
 // ⚠️ HARDWARE WARNING: GPIO4 = RS485 DE = SD CS on Waveshare board!
 //    SD and Modbus CANNOT be used simultaneously on this board.
-//    If cfg.pin_sd_cs == cfg.pin_rs485_de, SD init is BLOCKED.
+//    If cfg.pin_sd_cs == cfg.pin_rs485_de, SD init is BLOCKED unless Modbus paused.
 //
-// v2.8.0 — Initial SD card support
+// v2.9.1 — Fixed: SD uses FSPI (same as W5500), NOT separate HSPI!
+//           Schematic confirms: MOSI=GPIO11, MISO=GPIO12, SCLK=GPIO13, CS=GPIO4
+//           W5500 CS must be HIGH during SD transactions.
+//
 // SD is OPTIONAL: firmware works perfectly without SD card.
 // Compile with -DUSE_SD to include SD card support.
 // Without it, all SD functions compile to safe stubs (no code bloat).
@@ -18,15 +20,29 @@
 #include <SD.h>
 #include <SPI.h>
 
-// ─── SD SPI Bus (separate from W5500 FSPI!) ──────────────────
-// Waveshare ESP32-S3-ETH V1.0: SD is on SPI2, NOT shared with W5500
-static SPIClass *sd_spi = nullptr;
+// ─── SD on shared FSPI bus ──────────────────────────────────
+// The default SPI object (SPI) on ESP32-S3 maps to FSPI
+// which is the same bus W5500 uses. We share it with proper CS management.
+// NO separate SPIClass needed — we use the default FSPI SPI object.
 
 static bool sd_initialized = false;
 static bool sd_pin_conflict = false;  // SD CS == RS485 DE
 static uint64_t sd_total_bytes = 0;
 static uint64_t sd_used_bytes = 0;
 static char sd_card_type[16] = "NONE";
+
+// ─── W5500 CS management ────────────────────────────────────────
+// When SD uses the same FSPI bus as W5500, we must ensure W5500 CS is HIGH
+// during SD transactions so W5500 doesn't see garbage SPI data.
+// The W5500 CS pin is cfg.pin_eth_cs (default GPIO14).
+static void w5500_cs_high()
+{
+    if (cfg.pin_eth_cs >= 0)
+    {
+        pinMode(cfg.pin_eth_cs, OUTPUT);
+        digitalWrite(cfg.pin_eth_cs, HIGH);
+    }
+}
 
 // ─── SD Init ────────────────────────────────────────────────────
 bool sd_init(int8_t cs_pin)
@@ -63,37 +79,43 @@ bool sd_init(int8_t cs_pin)
         sd_pin_conflict = false;
     }
 
-    LOG_I("[SD] Initializing with CS=%d on SEPARATE SPI bus (MOSI=6,MISO=5,SCLK=7)...\n", cs_pin);
+    LOG_I("[SD] Initializing with CS=%d on SHARED FSPI bus (MOSI=11,MISO=12,SCLK=13)...\n", cs_pin);
 
-    // Create separate SPI bus for SD — does NOT interfere with W5500 FSPI
-    if (!sd_spi)
-    {
-        sd_spi = new SPIClass(HSPI);  // HSPI = SPI2, separate from FSPI used by W5500
-        if (!sd_spi)
-        {
-            LOG_E("[SD] Failed to allocate SPI bus\n");
-            return false;
-        }
-    }
+    // Step 1: Ensure W5500 CS is HIGH so it doesn't interfere with SD SPI
+    w5500_cs_high();
+    LOG_I("[SD] W5500 CS (GPIO%d) set HIGH\n", cfg.pin_eth_cs);
 
-    // Initialize SD SPI bus with correct Waveshare pin mapping
-    sd_spi->begin(7, 5, 6, cs_pin);  // SCLK=7, MISO=5, MOSI=6, CS=cs_pin
+    // Step 2: Ensure the FSPI bus is initialized with correct pins
+    // SPI.begin() on FSPI defaults to the correct Waveshare pin mapping
+    // MOSI=11, MISO=12, SCLK=13 — these are shared with W5500
+    SPI.begin(PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, cs_pin);
 
-    // Explicitly set CS pin HIGH before SD.begin
+    // Step 3: Drive SD CS HIGH before SD.begin (SD spec requires CS high at init)
     pinMode(cs_pin, OUTPUT);
     digitalWrite(cs_pin, HIGH);
     delay(10);
 
-    // Start with low speed for init (SD spec requires ≤400kHz for CMD0)
-    if (!SD.begin(cs_pin, *sd_spi, 400000))  // 400 kHz initial — SD spec
+    // Step 4: Re-assert W5500 CS HIGH after SPI.begin (may have changed pin modes)
+    w5500_cs_high();
+
+    // Step 5: Start with low speed for init (SD spec requires ≤400kHz for CMD0)
+    if (!SD.begin(cs_pin, SPI, 400000))  // 400 kHz initial — SD spec
     {
         LOG_E("[SD] FAILED at 400kHz — trying 1MHz...\n");
         delay(100);
-        if (!SD.begin(cs_pin, *sd_spi, 1000000))  // try 1 MHz
+        // Re-assert W5500 CS HIGH before retry
+        w5500_cs_high();
+        if (!SD.begin(cs_pin, SPI, 1000000))  // try 1 MHz
         {
-            LOG_E("[SD] FAILED — no card or bad wiring\n");
-            sd_initialized = false;
-            return false;
+            LOG_E("[SD] FAILED — trying 20kHz...\n");
+            delay(100);
+            w5500_cs_high();
+            if (!SD.begin(cs_pin, SPI, 20000))  // try 20 kHz (extreme fallback)
+            {
+                LOG_E("[SD] FAILED at all speeds — no card or bad wiring\n");
+                sd_initialized = false;
+                return false;
+            }
         }
     }
 
@@ -130,6 +152,9 @@ bool sd_init(int8_t cs_pin)
 void sd_deinit()
 {
     if (!sd_initialized) return;
+
+    // Re-assert W5500 CS HIGH during cleanup
+    w5500_cs_high();
     SD.end();
     sd_initialized = false;
     LOG_I("[SD] Deinitialized\n");
@@ -142,6 +167,7 @@ String sd_test_init()
     String result = "{";
     result += "\"pin_sd_cs\":" + String(cfg.pin_sd_cs) + ",";
     result += "\"pin_rs485_de\":" + String(cfg.pin_rs485_de) + ",";
+    result += "\"pin_eth_cs\":" + String(cfg.pin_eth_cs) + ",";
     result += "\"modbus_paused_before\":" + String(modbus_is_paused() ? "true" : "false") + ",";
 
     // Step 1: Pause Modbus
@@ -173,41 +199,46 @@ String sd_test_init()
         result += "\"de_low_read\":" + String(de_read) + ",";
     }
 
-    // Step 4: SPI bus init
-    if (!sd_spi)
+    // Step 4: Drive W5500 CS HIGH (shared bus!)
+    if (cfg.pin_eth_cs >= 0)
     {
-        sd_spi = new SPIClass(HSPI);
-        result += "\"spi_created\":true,";
-    }
-    else
-    {
-        result += "\"spi_created:false,spi_exists:true\",";
+        w5500_cs_high();
+        delay(5);
+        int eth_cs_read = digitalRead(cfg.pin_eth_cs);
+        result += "\"eth_cs_high_read\":" + String(eth_cs_read) + ",";
     }
 
-    sd_spi->begin(7, 5, 6, cs);  // SCLK=7, MISO=5, MOSI=6
+    // Step 5: Initialize FSPI bus with correct Waveshare pins
+    SPI.begin(PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, cs);
+    result += "\"spi_begin_pins\":\"SCLK=" + String(PIN_SD_SCLK) + ",MISO=" + String(PIN_SD_MISO) + ",MOSI=" + String(PIN_SD_MOSI) + "\",";
     result += "\"spi_begin_ok\":true,";
 
-    // Step 5: CS HIGH again after SPI.begin (SPI.begin may change pin modes)
+    // Step 6: CS HIGH again after SPI.begin (SPI.begin may change pin modes)
     pinMode(cs, OUTPUT);
     digitalWrite(cs, HIGH);
     delay(10);
     int cs_read2 = digitalRead(cs);
     result += "\"cs_high_read2\":" + String(cs_read2) + ",";
 
-    // Step 6: SD.begin at 400kHz
-    bool ok400 = SD.begin(cs, *sd_spi, 400000);
+    // Step 7: W5500 CS HIGH again after SPI.begin
+    w5500_cs_high();
+
+    // Step 8: SD.begin at 400kHz
+    bool ok400 = SD.begin(cs, SPI, 400000);
     result += "\"sd_begin_400khz\":" + String(ok400 ? "true" : "false") + ",";
 
     if (!ok400)
     {
         delay(100);
-        bool ok1000 = SD.begin(cs, *sd_spi, 1000000);
+        w5500_cs_high();
+        bool ok1000 = SD.begin(cs, SPI, 1000000);
         result += "\"sd_begin_1mhz\":" + String(ok1000 ? "true" : "false") + ",";
 
         if (!ok1000)
         {
             delay(100);
-            bool ok20000 = SD.begin(cs, *sd_spi, 20000);
+            w5500_cs_high();
+            bool ok20000 = SD.begin(cs, SPI, 20000);
             result += "\"sd_begin_20khz\":" + String(ok20000 ? "true" : "false") + ",";
 
             if (!ok20000)
@@ -247,6 +278,7 @@ String sd_test_init()
     sd_initialized = false;  // Reset — we just tested, didn't keep it
     return result;
 }
+
 // ─── SD Exclusive Mode ───────────────────────────────────────────
 // For boards where GPIO4 is shared between RS485 DE and SD CS (Waveshare ESP32-S3-ETH V1.0).
 // Exclusive mode pauses Modbus, initializes SD, and allows browsing.
@@ -274,7 +306,10 @@ bool sd_begin_exclusive()
         delay(10);
     }
 
-    // Now safe to init SD because Modbus is paused and DE is LOW
+    // Drive W5500 CS HIGH — we share FSPI bus!
+    w5500_cs_high();
+
+    // Now safe to init SD because Modbus is paused, DE is LOW, W5500 CS is HIGH
     bool ok = sd_init(cfg.pin_sd_cs);
     if (ok)
     {
@@ -494,10 +529,7 @@ char *sd_browse_dir(const char *path, size_t *out_len)
     {
         JsonObject obj = arr.createNestedObject();
         const char *ename = entry.name();
-        // Strip leading path prefix — SD library returns "/path/file"
-        // We want just the filename relative to the browsed directory
         String fullPath = String(ename);
-        // Extract just the last segment after the final '/'
         int lastSlash = fullPath.lastIndexOf('/');
         String baseName = (lastSlash >= 0) ? fullPath.substring(lastSlash + 1) : fullPath;
         obj["name"] = baseName;
@@ -548,11 +580,9 @@ bool sd_format()
     if (!sd_initialized) return false;
     LOG_I("[SD] Formatting SD card...\n");
 
-    // Walk and delete all files from root
     File root = SD.open("/");
     if (!root) return false;
 
-    // Collect files to delete (can't delete while iterating same dir)
     String filesToDelete[128];
     String dirsToDelete[64];
     int fileCount = 0, dirCount = 0;
@@ -574,18 +604,14 @@ bool sd_format()
     }
     root.close();
 
-    // Delete files first
     for (int i = 0; i < fileCount; i++)
     {
         SD.remove(filesToDelete[i].c_str());
         LOG_I("[SD] Deleted file: %s\n", filesToDelete[i].c_str());
     }
 
-    // Delete directories (non-recursive — only empty dirs)
-    // Walk subdirs and delete their contents first
     for (int i = 0; i < dirCount; i++)
     {
-        // Delete contents of subdirectory
         File sub = SD.open(dirsToDelete[i].c_str());
         if (sub)
         {
@@ -596,7 +622,6 @@ bool sd_format()
                 sf.close();
                 if (!SD.remove(spath.c_str()))
                 {
-                    // It may be a nested dir — try rmdir
                     SD.rmdir(spath.c_str());
                 }
                 sf = sub.openNextFile();
@@ -607,7 +632,6 @@ bool sd_format()
         LOG_I("[SD] Removed dir: %s\n", dirsToDelete[i].c_str());
     }
 
-    // Recreate /registers directory
     SD.mkdir("/registers");
 
     sd_refresh_stats();
