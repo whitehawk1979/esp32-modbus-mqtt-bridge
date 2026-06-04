@@ -165,6 +165,12 @@ bool mqtt_is_connected()
     return mqtt.connected();
 }
 
+// Public wrapper — allows other modules (led_handler, etc.) to publish
+bool mqtt_publish_topic(const char *topic, const char *payload, bool retained)
+{
+    return mqtt_pub(topic, payload, retained);
+}
+
 void mqtt_force_disconnect()
 {
     if (mqtt.connected())
@@ -234,6 +240,12 @@ void mqtt_init()
             mqtt_pub("homeassistant/status", "online", true);
         // Publish bridge system device discovery
         mqtt_publish_bridge_discovery();
+#ifdef USE_WS2812
+        // ── LED: discovery, subscribe, state ──
+        led_setup_discovery();
+        mqtt.subscribe("modbusmqtt/led/set", MQTT_QOS);
+        led_publish_state();
+#endif
     }
     else
     {
@@ -299,6 +311,12 @@ void mqtt_loop()
                     mqtt_pub("homeassistant/status", "online", true);
                 // Publish bridge system device discovery
                 mqtt_publish_bridge_discovery();
+#ifdef USE_WS2812
+                // ── LED: discovery, subscribe, state ──
+                led_setup_discovery();
+                mqtt.subscribe("modbusmqtt/led/set", MQTT_QOS);
+                led_publish_state();
+#endif
                 for (uint16_t i = 0; i < module_count; i++)
                 {
                     mqtt_subscribe_commands(&modules[i]);
@@ -346,13 +364,19 @@ void mqtt_loop()
 // ─── MQTT Callback (relay commands) ────────────────────────────
 static void mqtt_callback(char *topic, byte *payload, unsigned int length)
 {
-    char msg[32] = {0};
+    char msg[256] = {0};  // Larger buffer for LED JSON commands
     if (length >= sizeof(msg))
         length = sizeof(msg) - 1;
     memcpy(msg, payload, length);
     msg[length] = '\0';
 
     LOG_D("[MQTT-CB] topic='%s' msg='%s'\n", topic, msg);
+
+    // ── LED command (modbusmqtt/led/set) ──
+#ifdef USE_WS2812
+    if (led_handle_command(topic, msg, length))
+        return;  // Handled
+#endif
 
     String t = String(topic);
     String prefix = String(cfg.mqtt_prefix) + "/ha_v2/";

@@ -44,7 +44,8 @@
 #define PIN_RS485_RX 44  // UART2 RX (Modbus)
 #define PIN_RS485_TX 43  // UART2 TX (Modbus)
 #define PIN_RS485_DE 4   // RS485 Driver Enable (DE/RE)
-#define PIN_STATUS_LED 2 // Built-in LED
+#define PIN_STATUS_LED 2 // Built-in LED (GPIO2 — boot/standalone)
+#define PIN_WS2812    21 // WS2812B RGB LED (Waveshare ESP32-S3-ETH V1.0)
 #define PIN_CONFIG_BTN 0 // BOOT button — hold = WiFi config portal
 
 // W5500 SPI Ethernet pins (Waveshare ESP32-S3-ETH V1.0)
@@ -495,6 +496,18 @@ bool sd_append_file(const char *path, const uint8_t *data, size_t len);
 bool sd_file_exists(const char *path);
 bool sd_remove_file(const char *path);
 
+// led_handler.cpp
+void led_init();
+void led_set_color(uint8_t r, uint8_t g, uint8_t b);
+void led_set_brightness(uint8_t percent);
+void led_set_state(bool on);         // on/off toggle
+bool led_is_on();
+void led_get_color(uint8_t *r, uint8_t *g, uint8_t *b);
+uint8_t led_get_brightness();
+void led_publish_state();            // MQTT state publish
+void led_setup_discovery();          // MQTT HA discovery
+bool led_handle_command(const char *topic, const char *payload, size_t len);  // MQTT cmd
+
 // modbus_handler.cpp
 void modbus_init();
 void modbus_set_timeout(uint16_t ms);
@@ -544,6 +557,7 @@ void click_set_callback(ClickCallback cb);
 void mqtt_init();
 void mqtt_loop();
 bool mqtt_is_connected();
+bool mqtt_publish_topic(const char *topic, const char *payload, bool retained = false);
 bool mqtt_is_on_lan();
 void mqtt_force_disconnect();
 void mqtt_cleanup_discovery(Slave_Module *mod);

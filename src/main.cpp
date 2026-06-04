@@ -819,6 +819,12 @@ static void do_staged_init()
                 LOG_ELN("[INIT] SD FAILED — card present?");
         }
 #endif
+#ifdef USE_WS2812
+        // ── WS2812B RGB LED init ──
+        LOG_ILN("[INIT] WS2812B LED...");
+        led_init();
+        LOG_ILN("[INIT] LED OK");
+#endif
         setup_stage = 4;
         break;
     case 4:

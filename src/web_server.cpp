@@ -3045,7 +3045,70 @@ static void handleApiDiag()
     serializeJson(doc, payload);
     WS->send(200, "application/json", payload);
 }
-// Backup: reads ALL NVRAM keys → JSON (includes passwords, per-module names, rooms)
+
+// ─── LED API ──────────────────────────────────────────────────
+#ifdef USE_WS2812
+// GET /api/led — current LED state
+static void handleApiLed()
+{
+    if (!web_auth_ok()) return;
+    JsonDocument doc;
+    doc["state"] = led_is_on() ? "ON" : "OFF";
+    uint8_t r, g, b;
+    led_get_color(&r, &g, &b);
+    JsonObject color = doc.createNestedObject("color");
+    color["r"] = r;
+    color["g"] = g;
+    color["b"] = b;
+    doc["brightness"] = led_get_brightness();
+    doc["pin"] = PIN_WS2812;
+    String payload;
+    serializeJson(doc, payload);
+    WS->send(200, "application/json", payload);
+}
+
+// POST /api/led/set — set LED state
+// Params: state=ON/OFF, r=0-255, g=0-255, b=0-255, brightness=0-100
+static void handleApiLedSet()
+{
+    if (!web_auth_ok()) return;
+
+    if (WS->hasArg("state"))
+    {
+        String state = WS->arg("state");
+        led_set_state(state.equalsIgnoreCase("ON"));
+    }
+    if (WS->hasArg("r") || WS->hasArg("g") || WS->hasArg("b"))
+    {
+        uint8_t r = WS->hasArg("r") ? (uint8_t)WS->arg("r").toInt() : 0;
+        uint8_t g = WS->hasArg("g") ? (uint8_t)WS->arg("g").toInt() : 0;
+        uint8_t b = WS->hasArg("b") ? (uint8_t)WS->arg("b").toInt() : 0;
+        led_set_color(r, g, b);
+    }
+    if (WS->hasArg("brightness"))
+    {
+        uint8_t bri = (uint8_t)WS->arg("brightness").toInt();
+        led_set_brightness(bri);
+    }
+
+    led_publish_state();  // Sync to MQTT
+
+    // Return new state
+    JsonDocument doc;
+    doc["ok"] = true;
+    doc["state"] = led_is_on() ? "ON" : "OFF";
+    uint8_t r, g, b;
+    led_get_color(&r, &g, &b);
+    JsonObject color = doc.createNestedObject("color");
+    color["r"] = r;
+    color["g"] = g;
+    color["b"] = b;
+    doc["brightness"] = led_get_brightness();
+    String payload;
+    serializeJson(doc, payload);
+    WS->send(200, "application/json", payload);
+}
+#endif
 // Restore: POST JSON → writes NVRAM keys → reboot
 
 // NVRAM keys to export — MUST match NV_KEY_* defines in modbus_mqtt_ha_bridge.h
@@ -3815,6 +3878,10 @@ void web_server_init()
     web.on("/api/sd/upload", HTTP_POST, handleApiSdUpload, handleApiSdUpload);
     web.on("/api/lan", HTTP_GET, handleApiLan);
     web.on("/api/diag", HTTP_GET, handleApiDiag);
+#ifdef USE_WS2812
+    web.on("/api/led", HTTP_GET, handleApiLed);
+    web.on("/api/led/set", HTTP_POST, handleApiLedSet);
+#endif
 #ifdef USE_SD
     web.on("/api/sd/test", HTTP_GET, handleApiSdTest);
 #endif
@@ -3871,6 +3938,10 @@ void web_server_init()
     ethWeb.on("/api/sd/upload", ETH_HTTP_POST, handleApiSdUpload);
     ethWeb.on("/api/lan", ETH_HTTP_GET, handleApiLan);
     ethWeb.on("/api/diag", ETH_HTTP_GET, handleApiDiag);
+#ifdef USE_WS2812
+    ethWeb.on("/api/led", ETH_HTTP_GET, handleApiLed);
+    ethWeb.on("/api/led/set", ETH_HTTP_POST, handleApiLedSet);
+#endif
 #ifdef USE_SD
     ethWeb.on("/api/sd/test", ETH_HTTP_GET, handleApiSdTest);
 #endif
