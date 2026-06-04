@@ -21,9 +21,15 @@
 #include <SPI.h>
 
 // ─── SD on shared FSPI bus ──────────────────────────────────
-// The default SPI object (SPI) on ESP32-S3 maps to FSPI
-// which is the same bus W5500 uses. We share it with proper CS management.
-// NO separate SPIClass needed — we use the default FSPI SPI object.
+// The W5500 uses FSPI (MOSI=11, MISO=12, SCLK=13, CS=14).
+// SD card shares the SAME FSPI bus (MOSI=11, MISO=12, SCLK=13, CS=4).
+//
+// CRITICAL: We use a DEDICATED SPIClass for SD so that SD.begin() initializes
+// the bus with the correct pin mapping. The default SPI object may have been
+// configured by the Ethernet library with different settings.
+// SD.begin() internally calls SPI.begin() which would reset pin assignments!
+
+static SPIClass *sd_spi = nullptr;
 
 static bool sd_initialized = false;
 static bool sd_pin_conflict = false;  // SD CS == RS485 DE
@@ -85,10 +91,19 @@ bool sd_init(int8_t cs_pin)
     w5500_cs_high();
     LOG_I("[SD] W5500 CS (GPIO%d) set HIGH\n", cfg.pin_eth_cs);
 
-    // Step 2: Ensure the FSPI bus is initialized with correct pins
-    // SPI.begin() on FSPI defaults to the correct Waveshare pin mapping
-    // MOSI=11, MISO=12, SCLK=13 — these are shared with W5500
-    SPI.begin(PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, cs_pin);
+    // Step 2: Create dedicated SPIClass for FSPI with our pin mapping
+    // This is critical — SD.begin() calls SPI.begin() internally which would
+    // reset pin assignments to ESP32 defaults (23,19,18) if using the shared SPI object!
+    if (!sd_spi)
+    {
+        sd_spi = new SPIClass(FSPI);
+        if (!sd_spi)
+        {
+            LOG_E("[SD] Failed to allocate SPIClass\n");
+            return false;
+        }
+    }
+    sd_spi->begin(PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, cs_pin);
 
     // Step 3: Drive SD CS HIGH before SD.begin (SD spec requires CS high at init)
     pinMode(cs_pin, OUTPUT);
@@ -99,18 +114,18 @@ bool sd_init(int8_t cs_pin)
     w5500_cs_high();
 
     // Step 5: Start with low speed for init (SD spec requires ≤400kHz for CMD0)
-    if (!SD.begin(cs_pin, SPI, 400000))  // 400 kHz initial — SD spec
+    if (!SD.begin(cs_pin, *sd_spi, 400000))  // 400 kHz initial — SD spec
     {
         LOG_E("[SD] FAILED at 400kHz — trying 1MHz...\n");
         delay(100);
         // Re-assert W5500 CS HIGH before retry
         w5500_cs_high();
-        if (!SD.begin(cs_pin, SPI, 1000000))  // try 1 MHz
+        if (!SD.begin(cs_pin, *sd_spi, 1000000))  // try 1 MHz
         {
             LOG_E("[SD] FAILED — trying 20kHz...\n");
             delay(100);
             w5500_cs_high();
-            if (!SD.begin(cs_pin, SPI, 20000))  // try 20 kHz (extreme fallback)
+            if (!SD.begin(cs_pin, *sd_spi, 20000))  // try 20 kHz (extreme fallback)
             {
                 LOG_E("[SD] FAILED at all speeds — no card or bad wiring\n");
                 sd_initialized = false;
@@ -208,8 +223,10 @@ String sd_test_init()
         result += "\"eth_cs_high_read\":" + String(eth_cs_read) + ",";
     }
 
-    // Step 5: Initialize FSPI bus with correct Waveshare pins
-    SPI.begin(PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, cs);
+    // Step 5: Initialize DEDICATED FSPI SPIClass with correct Waveshare pins
+    if (!sd_spi)
+        sd_spi = new SPIClass(FSPI);
+    sd_spi->begin(PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, cs);
     result += "\"spi_begin_pins\":\"SCLK=" + String(PIN_SD_SCLK) + ",MISO=" + String(PIN_SD_MISO) + ",MOSI=" + String(PIN_SD_MOSI) + "\",";
     result += "\"spi_begin_ok\":true,";
 
@@ -223,22 +240,66 @@ String sd_test_init()
     // Step 7: W5500 CS HIGH again after SPI.begin
     w5500_cs_high();
 
+    // Step 7b: RAW SPI DEBUG — send CMD0 (GO_IDLE_STATE) directly
+    // This tells us if the SD card physically responds on the SPI bus
+    {
+        // First: dummy clock cycles with CS HIGH (SD spec: 74+ clocks before CMD0)
+        sd_spi->beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
+        for (int i = 0; i < 10; i++)  // 10 × 8 = 80 clock cycles
+            sd_spi->transfer(0xFF);
+        sd_spi->endTransaction();
+
+        // Check MISO level with CS HIGH (should be pulled up by card or resistor)
+        int miso_high = digitalRead(PIN_SD_MISO);
+
+        // Now assert CS and send CMD0
+        sd_spi->beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
+        digitalWrite(cs, LOW);  // Assert SD CS
+        delayMicroseconds(1);
+
+        // CMD0: 0x40 0x00 0x00 0x00 0x00 0x95 (CMD0 with valid CRC)
+        uint8_t cmd0[] = {0x40, 0x00, 0x00, 0x00, 0x00, 0x95};
+        for (int i = 0; i < 6; i++)
+            sd_spi->transfer(cmd0[i]);
+
+        // Read response (up to 16 bytes, looking for R1 response 0x01 = idle)
+        uint8_t resp = 0xFF;
+        int attempts = 0;
+        for (attempts = 0; attempts < 16; attempts++)
+        {
+            resp = sd_spi->transfer(0xFF);
+            if (resp != 0xFF) break;  // Got a response
+        }
+
+        // Check MISO while CS is LOW
+        int miso_low = digitalRead(PIN_SD_MISO);
+
+        sd_spi->endTransaction();
+        digitalWrite(cs, HIGH);
+
+        result += "\"miso_high\":" + String(miso_high) + ",";
+        result += "\"miso_low\":" + String(miso_low) + ",";
+        result += "\"cmd0_response\":\"0x" + String(resp, HEX) + "\",";
+        result += "\"cmd0_attempts\":" + String(attempts) + ",";
+        result += "\"cmd0_ok\":" + String((resp == 0x01) ? "true" : "false") + ",";
+    }
+
     // Step 8: SD.begin at 400kHz
-    bool ok400 = SD.begin(cs, SPI, 400000);
+    bool ok400 = SD.begin(cs, *sd_spi, 400000);
     result += "\"sd_begin_400khz\":" + String(ok400 ? "true" : "false") + ",";
 
     if (!ok400)
     {
         delay(100);
         w5500_cs_high();
-        bool ok1000 = SD.begin(cs, SPI, 1000000);
+        bool ok1000 = SD.begin(cs, *sd_spi, 1000000);
         result += "\"sd_begin_1mhz\":" + String(ok1000 ? "true" : "false") + ",";
 
         if (!ok1000)
         {
             delay(100);
             w5500_cs_high();
-            bool ok20000 = SD.begin(cs, SPI, 20000);
+            bool ok20000 = SD.begin(cs, *sd_spi, 20000);
             result += "\"sd_begin_20khz\":" + String(ok20000 ? "true" : "false") + ",";
 
             if (!ok20000)
