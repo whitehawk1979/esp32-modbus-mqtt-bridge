@@ -2927,7 +2927,7 @@ static void handleApiDiag()
     JsonDocument doc(PsramAllocator::instance());
 
     // ── System ──
-    doc["fw"] = "2.8.0";
+    doc["fw"] = FIRMWARE_VERSION;
     doc["uptime_s"] = millis() / 1000;
     doc["heap_free"] = ESP.getFreeHeap();
     doc["psram_free"] = ESP.getFreePsram();
