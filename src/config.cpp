@@ -59,7 +59,7 @@ static void cfg_defaults()
     // ── GPIO Pins (Waveshare ESP32-S3-ETH V1.0 = W5500) ──
     cfg.pin_rs485_rx = 44;
     cfg.pin_rs485_tx = 43;
-    cfg.pin_rs485_de = 4;
+    cfg.pin_rs485_de = 42;
     cfg.pin_status_led = 2;
     cfg.pin_config_btn = 0;
     cfg.pin_eth_mosi = 11;
@@ -68,8 +68,8 @@ static void cfg_defaults()
     cfg.pin_eth_cs = 14;
     cfg.pin_eth_int = 10;
     cfg.pin_eth_rst = 9;
-    // ── SD Card (SHARED FSPI bus with W5500!) ──
-    // Waveshare ESP32-S3-ETH V1.0: SD on FSPI (MOSI=11,MISO=12,SCLK=13,CS=4)
+    // ── SD Card (SEPARATE HSPI bus from W5500 FSPI) ──
+    // Waveshare ESP32-S3-ETH V1.0: SD on HSPI (MOSI=6,MISO=5,SCLK=7,CS=4)
     cfg.sd_enabled = false; // Off by default — enable via web UI
     cfg.pin_sd_cs = 4;
     // ── Hostname + Auth ──
@@ -447,7 +447,7 @@ void config_load()
 
     cfg.pin_rs485_rx = (int8_t)nv.getInt(NV_KEY_PIN_RS485_RX, 44);
     cfg.pin_rs485_tx = (int8_t)nv.getInt(NV_KEY_PIN_RS485_TX, 43);
-    cfg.pin_rs485_de = (int8_t)nv.getInt(NV_KEY_PIN_RS485_DE, 4);
+    cfg.pin_rs485_de = (int8_t)nv.getInt(NV_KEY_PIN_RS485_DE, 42);
     cfg.pin_status_led = (int8_t)nv.getInt(NV_KEY_PIN_LED, 2);
     cfg.pin_config_btn = (int8_t)nv.getInt(NV_KEY_PIN_BTN, 0);
     cfg.pin_eth_mosi = (int8_t)nv.getInt(NV_KEY_PIN_ETH_MOSI, 11);

@@ -1,46 +1,49 @@
-// ─── SD Card Handler ───────────────────────────────────────────
-// SD card on SAME FSPI bus as W5500 (Waveshare ESP32-S3-ETH V1.0)
-// W5500: MOSI=11, MISO=12, SCLK=13, CS=14 (FSPI)
-// SD:    MOSI=11, MISO=12, SCLK=13, CS=4  (SAME FSPI bus!)
-// ⚠️ HARDWARE WARNING: GPIO4 = RS485 DE = SD CS on Waveshare board!
-//    SD and Modbus CANNOT be used simultaneously on this board.
-//    If cfg.pin_sd_cs == cfg.pin_rs485_de, SD init is BLOCKED unless Modbus paused.
+// ─── SD Card Handler — SDIO 1-bit + SPI fallback ──────────────────
+// Waveshare ESP32-S3-ETH V1.0 SD card slot
 //
-// v2.9.1 — Fixed: SD uses FSPI (same as W5500), NOT separate HSPI!
-//           Schematic confirms: MOSI=GPIO11, MISO=GPIO12, SCLK=GPIO13, CS=GPIO4
-//           W5500 CS must be HIGH during SD transactions.
+// SDIO 1-bit (NO CS needed!):
+//   CLK=GPIO7, CMD=GPIO6, D0=GPIO5
+//   Works even without R7/R19 (GPIO4→CS connection)
+//
+// SPI fallback (CS required — only works if R7/R19 populated):
+//   MOSI=6, MISO=5, SCLK=7, CS=4  (HSPI)
+//
+// RS485 DE = GPIO42 (moved from GPIO4)
+// W5500 = FSPI (MOSI=11, MISO=12, SCLK=13, CS=14) — SEPARATE bus
 //
 // SD is OPTIONAL: firmware works perfectly without SD card.
 // Compile with -DUSE_SD to include SD card support.
-// Without it, all SD functions compile to safe stubs (no code bloat).
 
 #include "modbus_mqtt_ha_bridge.h"
 
 #ifdef USE_SD
+
+#include <SD_MMC.h>
 #include <SD.h>
 #include <SPI.h>
 
-// ─── SD on shared FSPI bus ──────────────────────────────────
-// The W5500 uses FSPI (MOSI=11, MISO=12, SCLK=13, CS=14).
-// SD card shares the SAME FSPI bus (MOSI=11, MISO=12, SCLK=13, CS=4).
-//
-// CRITICAL: We use a DEDICATED SPIClass for SD so that SD.begin() initializes
-// the bus with the correct pin mapping. The default SPI object may have been
-// configured by the Ethernet library with different settings.
-// SD.begin() internally calls SPI.begin() which would reset pin assignments!
-
-static SPIClass *sd_spi = nullptr;
-
+// ─── State ────────────────────────────────────────────────────
 static bool sd_initialized = false;
-static bool sd_pin_conflict = false;  // SD CS == RS485 DE
+static bool sd_pin_conflict = false;
+static bool sd_using_sdio = false;   // true = SDIO 1-bit, false = SPI
 static uint64_t sd_total_bytes = 0;
 static uint64_t sd_used_bytes = 0;
 static char sd_card_type[16] = "NONE";
 
+// SPI bus (fallback)
+static SPIClass *sd_spi = nullptr;
+
+// ─── Helper ───────────────────────────────────────────────────
+static char *psram_strdup(const char *s)
+{
+    size_t len = strlen(s);
+    char *buf = (char *)psram_malloc(len + 1);
+    if (buf) memcpy(buf, s, len + 1);
+    return buf;
+}
+
 // ─── W5500 CS management ────────────────────────────────────────
-// When SD uses the same FSPI bus as W5500, we must ensure W5500 CS is HIGH
-// during SD transactions so W5500 doesn't see garbage SPI data.
-// The W5500 CS pin is cfg.pin_eth_cs (default GPIO14).
+// Ensure W5500 CS is HIGH during SD SPI transactions
 static void w5500_cs_high()
 {
     if (cfg.pin_eth_cs >= 0)
@@ -50,93 +53,133 @@ static void w5500_cs_high()
     }
 }
 
-// ─── SD Init ────────────────────────────────────────────────────
-bool sd_init(int8_t cs_pin)
+// ─── SDIO 1-bit Init ──────────────────────────────────────────
+// Uses Arduino SD_MMC library (wraps ESP-IDF sdmmc driver).
+// Requires only CLK, CMD, D0 — NO CS line needed!
+// ESP32-S3 supports GPIO matrix remap → any GPIO for SDMMC.
+static bool sd_init_sdio()
 {
-    if (sd_initialized)
-    {
-        LOG_I("[SD] Already initialized\n");
-        return true;
-    }
+    LOG_I("[SD] Trying SDIO 1-bit mode (CLK=7, CMD=6, D0=5)...\n");
 
-    if (cs_pin < 0)
+    // Set custom GPIO pins for SDMMC (GPIO matrix remap!)
+    // Waveshare board: CLK=7, CMD=6, D0=5 — NOT the ESP32-S3 default IOMUX
+    if (!SD_MMC.setPins(PIN_SD_SCLK, PIN_SD_MOSI, PIN_SD_MISO))
     {
-        LOG_I("[SD] CS pin not configured\n");
+        LOG_E("[SD] SD_MMC.setPins() failed!\n");
+        return false;
+    }
+    LOG_I("[SD] SD_MMC.setPins: CLK=%d, CMD=%d, D0=%d\n",
+          PIN_SD_SCLK, PIN_SD_MOSI, PIN_SD_MISO);
+
+    // Begin in 1-bit mode, 20 MHz, format_if_mount_failed=false
+    // mountpoint = "/sdcard"
+    if (!SD_MMC.begin("/sdcard", true, false, SDMMC_FREQ_DEFAULT))
+    {
+        LOG_E("[SD] SD_MMC.begin() 1-bit FAILED\n");
+        SD_MMC.end();
         return false;
     }
 
-    // ⚠️ HARDWARE PIN CONFLICT CHECK: GPIO4 = RS485 DE = SD CS
-    // On Waveshare ESP32-S3-ETH, these share the same GPIO!
+    sd_using_sdio = true;
+    sd_initialized = true;
+
+    // Card info
+    sdcard_type_t type = SD_MMC.cardType();
+    if (type == CARD_MMC)
+        strlcpy(sd_card_type, "MMC", sizeof(sd_card_type));
+    else if (type == CARD_SD)
+        strlcpy(sd_card_type, "SDSC", sizeof(sd_card_type));
+    else if (type == CARD_SDHC)
+        strlcpy(sd_card_type, "SDHC", sizeof(sd_card_type));
+    else
+        strlcpy(sd_card_type, "UNKNOWN", sizeof(sd_card_type));
+
+    sd_total_bytes = SD_MMC.cardSize();
+    sd_used_bytes = SD_MMC.usedBytes();
+
+    LOG_I("[SD] SDIO 1-bit OK — Type: %s, Size: %llu KB, Used: %llu KB\n",
+          sd_card_type, sd_total_bytes / 1024, sd_used_bytes / 1024);
+
+    // Create /registers directory if not exists
+    if (!SD_MMC.exists("/registers"))
+    {
+        SD_MMC.mkdir("/registers");
+        LOG_I("[SD] Created /registers directory\n");
+    }
+
+    return true;
+}
+
+// ─── SPI Init (fallback) ───────────────────────────────────────
+static bool sd_init_spi(int8_t cs_pin)
+{
+    LOG_I("[SD] Trying SPI mode (CS=%d, MOSI=6, MISO=5, SCLK=7)...\n", cs_pin);
+
+    if (cs_pin < 0)
+    {
+        LOG_E("[SD] SPI mode requires CS pin\n");
+        return false;
+    }
+
+    // Check pin conflict with RS485 DE
     if (cs_pin == cfg.pin_rs485_de && cfg.pin_rs485_de >= 0)
     {
         sd_pin_conflict = true;
-        // If Modbus is paused (exclusive mode), we CAN proceed safely
-        // because DE is held LOW and Modbus won't touch the pin.
         if (!modbus_is_paused())
         {
-            LOG_E("[SD] BLOCKED — GPIO%d is RS485 DE AND SD CS! Cannot use both.\n", cs_pin);
-            LOG_E("[SD] Change SD CS or RS485 DE pin to resolve conflict.\n");
+            LOG_E("[SD] BLOCKED — GPIO%d is RS485 DE AND SD CS!\n", cs_pin);
             return false;
         }
-        LOG_I("[SD] Pin conflict GPIO%d (DE=CS) but Modbus paused — proceeding in exclusive mode\n", cs_pin);
+        LOG_I("[SD] Pin conflict GPIO%d but Modbus paused — exclusive mode\n", cs_pin);
     }
     else
     {
         sd_pin_conflict = false;
     }
 
-    LOG_I("[SD] Initializing with CS=%d on SHARED FSPI bus (MOSI=11,MISO=12,SCLK=13)...\n", cs_pin);
-
-    // Step 1: Ensure W5500 CS is HIGH so it doesn't interfere with SD SPI
     w5500_cs_high();
-    LOG_I("[SD] W5500 CS (GPIO%d) set HIGH\n", cfg.pin_eth_cs);
 
-    // Step 2: Create dedicated SPIClass for FSPI with our pin mapping
-    // This is critical — SD.begin() calls SPI.begin() internally which would
-    // reset pin assignments to ESP32 defaults (23,19,18) if using the shared SPI object!
     if (!sd_spi)
     {
-        sd_spi = new SPIClass(FSPI);
+        sd_spi = new SPIClass(HSPI);
         if (!sd_spi)
         {
             LOG_E("[SD] Failed to allocate SPIClass\n");
             return false;
         }
     }
+
+    pinMode(PIN_SD_MISO, INPUT_PULLUP);
     sd_spi->begin(PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, cs_pin);
 
-    // Step 3: Drive SD CS HIGH before SD.begin (SD spec requires CS high at init)
     pinMode(cs_pin, OUTPUT);
     digitalWrite(cs_pin, HIGH);
     delay(10);
 
-    // Step 4: Re-assert W5500 CS HIGH after SPI.begin (may have changed pin modes)
     w5500_cs_high();
 
-    // Step 5: Start with low speed for init (SD spec requires ≤400kHz for CMD0)
-    if (!SD.begin(cs_pin, *sd_spi, 400000))  // 400 kHz initial — SD spec
+    // Try SD.begin at 400 kHz → 1 MHz → 20 kHz
+    if (!SD.begin(cs_pin, *sd_spi, 400000))
     {
-        LOG_E("[SD] FAILED at 400kHz — trying 1MHz...\n");
+        LOG_E("[SD] SPI 400kHz failed — trying 1MHz...\n");
         delay(100);
-        // Re-assert W5500 CS HIGH before retry
         w5500_cs_high();
-        if (!SD.begin(cs_pin, *sd_spi, 1000000))  // try 1 MHz
+        if (!SD.begin(cs_pin, *sd_spi, 1000000))
         {
-            LOG_E("[SD] FAILED — trying 20kHz...\n");
+            LOG_E("[SD] SPI 1MHz failed — trying 20kHz...\n");
             delay(100);
             w5500_cs_high();
-            if (!SD.begin(cs_pin, *sd_spi, 20000))  // try 20 kHz (extreme fallback)
+            if (!SD.begin(cs_pin, *sd_spi, 20000))
             {
-                LOG_E("[SD] FAILED at all speeds — no card or bad wiring\n");
-                sd_initialized = false;
+                LOG_E("[SD] SPI failed at all speeds\n");
                 return false;
             }
         }
     }
 
+    sd_using_sdio = false;
     sd_initialized = true;
 
-    // Card info
     uint8_t type = SD.cardType();
     if (type == CARD_MMC)
         strlcpy(sd_card_type, "MMC", sizeof(sd_card_type));
@@ -150,10 +193,9 @@ bool sd_init(int8_t cs_pin)
     sd_total_bytes = SD.totalBytes();
     sd_used_bytes = SD.usedBytes();
 
-    LOG_I("[SD] OK — Type: %s, Total: %llu KB, Used: %llu KB\n",
+    LOG_I("[SD] SPI OK — Type: %s, Total: %llu KB, Used: %llu KB\n",
           sd_card_type, sd_total_bytes / 1024, sd_used_bytes / 1024);
 
-    // Create /registers directory if not exists
     if (!SD.exists("/registers"))
     {
         SD.mkdir("/registers");
@@ -163,224 +205,268 @@ bool sd_init(int8_t cs_pin)
     return true;
 }
 
-// ─── SD Deinit ───────────────────────────────────────────────────
+// ─── Unified SD Init ──────────────────────────────────────────
+// mode: "sdio" = SDIO 1-bit only, "spi" = SPI only, "auto" = SDIO then SPI
+// Default from sd_init(cs_pin) calls sd_init(cs_pin, "spi") — SAFE, no crash risk
+bool sd_init(int8_t cs_pin, const char *mode)
+{
+    if (sd_initialized)
+    {
+        LOG_I("[SD] Already initialized\n");
+        return true;
+    }
+
+    // Pause Modbus during SD operations
+    modbus_pause();
+
+    bool try_sdio = (strcmp(mode, "sdio") == 0 || strcmp(mode, "auto") == 0);
+    bool try_spi  = (strcmp(mode, "spi") == 0  || strcmp(mode, "auto") == 0);
+
+    // ── Attempt 1: SDIO 1-bit (no CS needed, works without R7/R19) ──
+    if (try_sdio)
+    {
+        if (sd_init_sdio())
+        {
+            modbus_resume();
+            return true;
+        }
+        LOG_I("[SD] SDIO failed\n");
+    }
+
+    // ── Attempt 2: SPI fallback (needs CS, R7/R19 must be present) ──
+    if (try_spi && cs_pin >= 0)
+    {
+        if (sd_init_spi(cs_pin))
+        {
+            modbus_resume();
+            return true;
+        }
+    }
+
+    // Both failed
+    modbus_resume();
+    LOG_E("[SD] All init methods failed — no SD card or hardware issue\n");
+    return false;
+}
+
+// Legacy wrapper — SPI only (SAFE, no SDIO crash risk)
+bool sd_init(int8_t cs_pin)
+{
+    return sd_init(cs_pin, "spi");
+}
+
+// ─── SD Deinit ────────────────────────────────────────────────
 void sd_deinit()
 {
     if (!sd_initialized) return;
 
-    // Re-assert W5500 CS HIGH during cleanup
-    w5500_cs_high();
-    SD.end();
+    if (sd_using_sdio)
+    {
+        SD_MMC.end();
+        LOG_I("[SD] SDIO unmounted\n");
+    }
+    else
+    {
+        w5500_cs_high();
+        SD.end();
+        LOG_I("[SD] SPI unmounted\n");
+    }
+
     sd_initialized = false;
-    LOG_I("[SD] Deinitialized\n");
+    sd_using_sdio = false;
 }
 
-// ─── SD Test Init (detailed diagnostics) ────────────────────────
+// ─── SD Test Init (diagnostics) ───────────────────────────────
 String sd_test_init()
 {
-    // Returns JSON string with step-by-step SD init results
     String result = "{";
     result += "\"pin_sd_cs\":" + String(cfg.pin_sd_cs) + ",";
     result += "\"pin_rs485_de\":" + String(cfg.pin_rs485_de) + ",";
     result += "\"pin_eth_cs\":" + String(cfg.pin_eth_cs) + ",";
     result += "\"modbus_paused_before\":" + String(modbus_is_paused() ? "true" : "false") + ",";
 
-    // Step 1: Pause Modbus
     modbus_pause();
     result += "\"modbus_paused_after\":" + String(modbus_is_paused() ? "true" : "false") + ",";
 
-    // Step 2: Drive CS HIGH
     int cs = cfg.pin_sd_cs;
-    if (cs >= 0)
+
+    // ── Test 1: SDIO 1-bit mode ──
     {
-        pinMode(cs, OUTPUT);
-        digitalWrite(cs, HIGH);
-        delay(10);
-        int cs_read = digitalRead(cs);
-        result += "\"cs_high_read\":" + String(cs_read) + ",";
-    }
-    else
-    {
-        result += "\"cs_high_read\":\"N/A\",";
-    }
+        bool pins_ok = SD_MMC.setPins(PIN_SD_SCLK, PIN_SD_MOSI, PIN_SD_MISO);
+        result += "\"sdio_set_pins\":" + String(pins_ok ? "true" : "false") + ",";
 
-    // Step 3: Drive DE LOW explicitly
-    if (cfg.pin_rs485_de >= 0)
-    {
-        pinMode(cfg.pin_rs485_de, OUTPUT);
-        digitalWrite(cfg.pin_rs485_de, LOW);
-        delay(5);
-        int de_read = digitalRead(cfg.pin_rs485_de);
-        result += "\"de_low_read\":" + String(de_read) + ",";
-    }
+        bool sdio_ok = pins_ok && SD_MMC.begin("/sdcard", true, false, SDMMC_FREQ_DEFAULT);
+        result += "\"sdio_begin\":" + String(sdio_ok ? "true" : "false") + ",";
 
-    // Step 4: Drive W5500 CS HIGH (shared bus!)
-    if (cfg.pin_eth_cs >= 0)
-    {
-        w5500_cs_high();
-        delay(5);
-        int eth_cs_read = digitalRead(cfg.pin_eth_cs);
-        result += "\"eth_cs_high_read\":" + String(eth_cs_read) + ",";
-    }
-
-    // Step 5: Initialize DEDICATED FSPI SPIClass with correct Waveshare pins
-    if (!sd_spi)
-        sd_spi = new SPIClass(FSPI);
-    sd_spi->begin(PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, cs);
-    result += "\"spi_begin_pins\":\"SCLK=" + String(PIN_SD_SCLK) + ",MISO=" + String(PIN_SD_MISO) + ",MOSI=" + String(PIN_SD_MOSI) + "\",";
-    result += "\"spi_begin_ok\":true,";
-
-    // Step 6: CS HIGH again after SPI.begin (SPI.begin may change pin modes)
-    pinMode(cs, OUTPUT);
-    digitalWrite(cs, HIGH);
-    delay(10);
-    int cs_read2 = digitalRead(cs);
-    result += "\"cs_high_read2\":" + String(cs_read2) + ",";
-
-    // Step 7: W5500 CS HIGH again after SPI.begin
-    w5500_cs_high();
-
-    // Step 7b: RAW SPI DEBUG — send CMD0 (GO_IDLE_STATE) directly
-    // This tells us if the SD card physically responds on the SPI bus
-    {
-        // First: dummy clock cycles with CS HIGH (SD spec: 74+ clocks before CMD0)
-        sd_spi->beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
-        for (int i = 0; i < 10; i++)  // 10 × 8 = 80 clock cycles
-            sd_spi->transfer(0xFF);
-        sd_spi->endTransaction();
-
-        // Check MISO level with CS HIGH (should be pulled up by card or resistor)
-        int miso_high = digitalRead(PIN_SD_MISO);
-
-        // Now assert CS and send CMD0
-        sd_spi->beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
-        digitalWrite(cs, LOW);  // Assert SD CS
-        delayMicroseconds(1);
-
-        // CMD0: 0x40 0x00 0x00 0x00 0x00 0x95 (CMD0 with valid CRC)
-        uint8_t cmd0[] = {0x40, 0x00, 0x00, 0x00, 0x00, 0x95};
-        for (int i = 0; i < 6; i++)
-            sd_spi->transfer(cmd0[i]);
-
-        // Read response (up to 16 bytes, looking for R1 response 0x01 = idle)
-        uint8_t resp = 0xFF;
-        int attempts = 0;
-        for (attempts = 0; attempts < 16; attempts++)
+        if (sdio_ok)
         {
-            resp = sd_spi->transfer(0xFF);
-            if (resp != 0xFF) break;  // Got a response
+            sdcard_type_t t = SD_MMC.cardType();
+            const char *tname = (t == CARD_MMC) ? "MMC" : (t == CARD_SD) ? "SDSC" :
+                               (t == CARD_SDHC) ? "SDHC" : "UNKNOWN";
+            result += "\"sdio_card_type\":\"" + String(tname) + "\",";
+            result += "\"sdio_card_size_kb\":" + String(SD_MMC.cardSize() / 1024) + ",";
+            result += "\"sdio_total_kb\":" + String(SD_MMC.totalBytes() / 1024) + ",";
+            result += "\"sdio_used_kb\":" + String(SD_MMC.usedBytes() / 1024) + ",";
+            SD_MMC.end();
+            result += "\"sdio_ok\":true,";
+        }
+        else
+        {
+            SD_MMC.end();
+            result += "\"sdio_ok\":false,";
+        }
+    }
+
+    // ── Test 2: Raw SPI diagnostics ──
+    {
+        if (cs >= 0)
+        {
+            pinMode(cs, OUTPUT);
+            digitalWrite(cs, HIGH);
+            delay(10);
+            result += "\"cs_high_read\":" + String(digitalRead(cs)) + ",";
         }
 
-        // Check MISO while CS is LOW
-        int miso_low = digitalRead(PIN_SD_MISO);
+        if (cfg.pin_rs485_de >= 0)
+        {
+            pinMode(cfg.pin_rs485_de, OUTPUT);
+            digitalWrite(cfg.pin_rs485_de, LOW);
+            delay(5);
+            result += "\"de_low_read\":" + String(digitalRead(cfg.pin_rs485_de)) + ",";
+        }
 
-        sd_spi->endTransaction();
-        digitalWrite(cs, HIGH);
+        w5500_cs_high();
 
-        result += "\"miso_high\":" + String(miso_high) + ",";
-        result += "\"miso_low\":" + String(miso_low) + ",";
-        result += "\"cmd0_response\":\"0x" + String(resp, HEX) + "\",";
-        result += "\"cmd0_attempts\":" + String(attempts) + ",";
-        result += "\"cmd0_ok\":" + String((resp == 0x01) ? "true" : "false") + ",";
+        if (!sd_spi)
+            sd_spi = new SPIClass(HSPI);
+        pinMode(PIN_SD_MISO, INPUT_PULLUP);
+        sd_spi->begin(PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, cs);
+
+        if (cs >= 0)
+        {
+            pinMode(cs, OUTPUT);
+            digitalWrite(cs, HIGH);
+            delay(10);
+            result += "\"cs_high_read2\":" + String(digitalRead(cs)) + ",";
+        }
+        w5500_cs_high();
+
+        // Raw CMD0 test
+        if (cs >= 0)
+        {
+            sd_spi->beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
+            for (int i = 0; i < 10; i++)
+                sd_spi->transfer(0xFF);
+            int miso_high = digitalRead(PIN_SD_MISO);
+
+            sd_spi->beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
+            digitalWrite(cs, LOW);
+            delayMicroseconds(1);
+            uint8_t cmd0[] = {0x40, 0x00, 0x00, 0x00, 0x00, 0x95};
+            for (int i = 0; i < 6; i++)
+                sd_spi->transfer(cmd0[i]);
+            uint8_t resp = 0xFF;
+            int attempts = 0;
+            for (attempts = 0; attempts < 16; attempts++)
+            {
+                resp = sd_spi->transfer(0xFF);
+                if (resp != 0xFF) break;
+            }
+            int miso_low = digitalRead(PIN_SD_MISO);
+            sd_spi->endTransaction();
+            digitalWrite(cs, HIGH);
+
+            result += "\"miso_high\":" + String(miso_high) + ",";
+            result += "\"miso_low\":" + String(miso_low) + ",";
+            result += "\"cmd0_response\":\"0x" + String(resp, HEX) + "\",";
+            result += "\"cmd0_attempts\":" + String(attempts) + ",";
+            result += "\"cmd0_ok\":" + String((resp == 0x01) ? "true" : "false") + ",";
+        }
     }
 
-    // Step 8: SD.begin at 400kHz
-    bool ok400 = SD.begin(cs, *sd_spi, 400000);
-    result += "\"sd_begin_400khz\":" + String(ok400 ? "true" : "false") + ",";
-
-    if (!ok400)
+    // ── Test 3: SPI mode with Waveshare method ──
+    if (cs >= 0)
     {
-        delay(100);
-        w5500_cs_high();
-        bool ok1000 = SD.begin(cs, *sd_spi, 1000000);
-        result += "\"sd_begin_1mhz\":" + String(ok1000 ? "true" : "false") + ",";
+        SPI.begin(PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, cs);
+        pinMode(PIN_SD_MISO, INPUT_PULLUP);
+        bool ok_ws = SD.begin(cs);
+        result += "\"ws_sd_begin\":" + String(ok_ws ? "true" : "false") + ",";
+        if (ok_ws)
+        {
+            result += "\"ws_card_type\":\"" + String(SD.cardType()) + "\",";
+            result += "\"ws_card_size_kb\":" + String(SD.totalBytes() / 1024) + ",";
+            SD.end();
+        }
+    }
 
-        if (!ok1000)
+    // SPI with dedicated SPIClass at various speeds
+    if (cs >= 0)
+    {
+        bool ok400 = SD.begin(cs, *sd_spi, 400000);
+        result += "\"sd_begin_400khz\":" + String(ok400 ? "true" : "false") + ",";
+        if (!ok400)
         {
             delay(100);
             w5500_cs_high();
-            bool ok20000 = SD.begin(cs, *sd_spi, 20000);
-            result += "\"sd_begin_20khz\":" + String(ok20000 ? "true" : "false") + ",";
-
-            if (!ok20000)
+            bool ok1000 = SD.begin(cs, *sd_spi, 1000000);
+            result += "\"sd_begin_1mhz\":" + String(ok1000 ? "true" : "false") + ",";
+            if (!ok1000)
             {
-                // All failed — cleanup and resume
-                SD.end();
-                modbus_resume();
-                result += "\"result\":\"ALL_FAILED\"";
-                result += "}";
-                return result;
-            }
-            else
-            {
-                result += "\"card_type\":\"" + String(SD.cardType()) + "\",";
-                result += "\"card_size_kb\":" + String(SD.totalBytes() / 1024) + ",";
-                SD.end();
+                delay(100);
+                w5500_cs_high();
+                bool ok20000 = SD.begin(cs, *sd_spi, 20000);
+                result += "\"sd_begin_20khz\":" + String(ok20000 ? "true" : "false") + ",";
             }
         }
         else
         {
-            result += "\"card_type\":" + String(SD.cardType()) + ",";
-            result += "\"card_size_kb\":" + String(SD.totalBytes() / 1024) + ",";
+            result += "\"spi_card_type\":\"" + String(SD.cardType()) + "\",";
+            result += "\"spi_total_kb\":" + String(SD.totalBytes() / 1024) + ",";
             SD.end();
         }
     }
-    else
-    {
-        result += "\"card_type\":" + String(SD.cardType()) + ",";
-        result += "\"total_kb\":" + String(SD.totalBytes() / 1024) + ",";
-        result += "\"used_kb\":" + String(SD.usedBytes() / 1024) + ",";
-        SD.end();
-    }
 
     modbus_resume();
-    result += "\"result\":\"OK\"";
+
+    result += "\"ok\":" + String(sd_initialized ? "true" : "false") + ",";
+    result += "\"mode\":" + String(sd_using_sdio ? "\"sdio_1bit\"" : (sd_initialized ? "\"spi\"" : "\"none\"")) + ",";
+    result += "\"pin_conflict\":" + String(sd_pin_conflict ? "true" : "false");
     result += "}";
-    sd_initialized = false;  // Reset — we just tested, didn't keep it
+
+    sd_initialized = false;
     return result;
 }
 
-// ─── SD Exclusive Mode ───────────────────────────────────────────
-// For boards where GPIO4 is shared between RS485 DE and SD CS (Waveshare ESP32-S3-ETH V1.0).
-// Exclusive mode pauses Modbus, initializes SD, and allows browsing.
-// When done, deinit SD and resume Modbus.
-
+// ─── SD Exclusive Mode ────────────────────────────────────────
 static bool sd_exclusive_active = false;
 
 bool sd_begin_exclusive()
 {
     if (sd_initialized)
     {
-        // Already initialized (no conflict config or already in exclusive mode)
-        sd_exclusive_active = false; // not our responsibility to end it
+        sd_exclusive_active = false;
         return true;
     }
 
-    // Pause Modbus — this drives RS485 DE LOW so GPIO4 is safe for SD CS
     modbus_pause();
 
-    // Drive GPIO4 (SD CS) HIGH initially — SD spec requires CS high before init
     if (cfg.pin_sd_cs >= 0)
     {
         pinMode(cfg.pin_sd_cs, OUTPUT);
         digitalWrite(cfg.pin_sd_cs, HIGH);
         delay(10);
     }
-
-    // Drive W5500 CS HIGH — we share FSPI bus!
     w5500_cs_high();
 
-    // Now safe to init SD because Modbus is paused, DE is LOW, W5500 CS is HIGH
     bool ok = sd_init(cfg.pin_sd_cs);
     if (ok)
     {
         sd_exclusive_active = true;
-        LOG_I("[SD] Exclusive mode: SD initialized, Modbus paused\n");
+        LOG_I("[SD] Exclusive mode active (mode=%s)\n", sd_using_sdio ? "SDIO" : "SPI");
     }
     else
     {
-        // Init failed — resume Modbus immediately
-        LOG_E("[SD] Exclusive mode: init failed, resuming Modbus\n");
+        LOG_E("[SD] Exclusive mode: init failed\n");
         modbus_resume();
         sd_exclusive_active = false;
     }
@@ -389,50 +475,67 @@ bool sd_begin_exclusive()
 
 void sd_end_exclusive()
 {
-    if (!sd_exclusive_active)
-    {
-        // Not in exclusive mode (SD was initialized normally or already ended)
-        return;
-    }
-
+    if (!sd_exclusive_active) return;
     sd_deinit();
     sd_exclusive_active = false;
     modbus_resume();
-    LOG_I("[SD] Exclusive mode ended: SD deinitialized, Modbus resumed\n");
+    LOG_I("[SD] Exclusive mode ended\n");
 }
 
-bool sd_is_exclusive()
-{
-    return sd_exclusive_active;
-}
+bool sd_is_exclusive() { return sd_exclusive_active; }
 
-// ─── SD Status ──────────────────────────────────────────────────
+// ─── SD Status ────────────────────────────────────────────────
 bool sd_is_ok() { return sd_initialized; }
 bool sd_has_pin_conflict() { return sd_pin_conflict; }
-uint64_t sd_total_kb() { return sd_initialized ? sd_total_bytes / 1024 : 0; }
-uint64_t sd_used_kb() { return sd_initialized ? sd_used_bytes / 1024 : 0; }
+bool sd_is_sdio_mode() { return sd_using_sdio; }
+uint64_t sd_total_kb()
+{
+    if (!sd_initialized) return 0;
+    return sd_using_sdio ? SD_MMC.totalBytes() / 1024 : SD.totalBytes() / 1024;
+}
+uint64_t sd_used_kb()
+{
+    if (!sd_initialized) return 0;
+    return sd_using_sdio ? SD_MMC.usedBytes() / 1024 : SD.usedBytes() / 1024;
+}
 const char *sd_type_str() { return sd_card_type; }
 
-// Refresh usage stats (call periodically or after writes)
 void sd_refresh_stats()
 {
     if (!sd_initialized) return;
-    sd_total_bytes = SD.totalBytes();
-    sd_used_bytes = SD.usedBytes();
+    if (sd_using_sdio)
+    {
+        sd_total_bytes = SD_MMC.cardSize();
+        sd_used_bytes = SD_MMC.usedBytes();
+    }
+    else
+    {
+        sd_total_bytes = SD.totalBytes();
+        sd_used_bytes = SD.usedBytes();
+    }
 }
 
-// ─── Register List Save ─────────────────────────────────────────
+// ─── File Operations ─────────────────────────────────────────
+// SDIO mounts at /sdcard, SPI uses SD library's FS object
+// We use a helper to get the right FS object
+
+static fs::FS &sd_fs()
+{
+    return sd_using_sdio ? (fs::FS &)SD_MMC : (fs::FS &)SD;
+}
+
 bool sd_save_register_list(const char *device_name, const char *json_content, size_t json_len)
 {
     if (!sd_initialized) return false;
 
+    fs::FS &fs = sd_fs();
     char path[64];
     snprintf(path, sizeof(path), "/registers/%s.json", device_name);
 
-    if (SD.exists(path))
-        SD.remove(path);
+    if (!fs.exists("/registers"))
+        fs.mkdir("/registers");
 
-    File f = SD.open(path, FILE_WRITE);
+    File f = fs.open(path, FILE_WRITE);
     if (!f)
     {
         LOG_E("[SD] Failed to open %s for write\n", path);
@@ -441,22 +544,21 @@ bool sd_save_register_list(const char *device_name, const char *json_content, si
 
     size_t written = f.write((const uint8_t *)json_content, json_len);
     f.close();
-
     sd_refresh_stats();
 
     LOG_I("[SD] Saved %s — %u bytes written\n", path, written);
     return written == json_len;
 }
 
-// ─── Register List Read ─────────────────────────────────────────
 char *sd_read_register_list(const char *device_name, size_t *out_len)
 {
     if (!sd_initialized) return nullptr;
 
+    fs::FS &fs = sd_fs();
     char path[64];
     snprintf(path, sizeof(path), "/registers/%s.json", device_name);
 
-    File f = SD.open(path, FILE_READ);
+    File f = fs.open(path, FILE_READ);
     if (!f)
     {
         LOG_I("[SD] %s not found\n", path);
@@ -484,261 +586,141 @@ char *sd_read_register_list(const char *device_name, size_t *out_len)
     buf[read_bytes] = '\0';
 
     if (out_len) *out_len = read_bytes;
-    LOG_I("[SD] Read %s — %u bytes\n", path, read_bytes);
     return buf;
 }
 
-// ─── List Register Files ────────────────────────────────────────
+// ─── Directory Listing ───────────────────────────────────────
+String sd_list_dir(const char *path, int depth)
+{
+    if (!sd_initialized) return "[]";
+
+    fs::FS &fs = sd_fs();
+    String result = "[";
+
+    File root = fs.open(path);
+    if (!root || !root.isDirectory())
+    {
+        LOG_E("[SD] Cannot open dir %s\n", path);
+        return "[]";
+    }
+
+    bool first = true;
+    File entry = root.openNextFile();
+    while (entry)
+    {
+        if (!first) result += ",";
+        first = false;
+
+        result += "{";
+        result += "\"name\":\"" + String(entry.name()) + "\",";
+        result += "\"size\":" + String(entry.size()) + ",";
+        result += "\"is_dir\":" + String(entry.isDirectory() ? "true" : "false");
+
+        if (entry.isDirectory() && depth > 0 && entry.name()[0] != '.')
+        {
+            String subpath = String(path) + "/" + String(entry.name());
+            result += ",\"children\":" + sd_list_dir(subpath.c_str(), depth - 1);
+        }
+
+        result += "}";
+        entry = root.openNextFile();
+    }
+
+    result += "]";
+    return result;
+}
+
+// ─── Register File List ───────────────────────────────────────
 char *sd_list_register_files(size_t *out_len)
 {
-    if (!sd_initialized)
-    {
-        if (out_len) *out_len = 0;
-        return nullptr;
-    }
+    if (!sd_initialized) return nullptr;
 
-    File dir = SD.open("/registers");
+    fs::FS &fs = sd_fs();
+    String json = "[";
+
+    File dir = fs.open("/registers");
     if (!dir || !dir.isDirectory())
     {
-        if (out_len) *out_len = 0;
-        return nullptr;
+        if (out_len) *out_len = 2;
+        return psram_strdup("[]");
     }
 
-    JsonDocument doc;
-    JsonArray arr = doc.to<JsonArray>();
-
-    File entry = dir.openNextFile();
-    uint8_t count = 0;
-    while (entry && count < 16)
+    bool first = true;
+    File f = dir.openNextFile();
+    while (f)
     {
-        if (!entry.isDirectory())
+        if (!f.isDirectory())
         {
-            const char *name = entry.name();
-            if (strncmp(name, "/registers/", 11) == 0)
-                name += 11;
-            size_t nlen = strlen(name);
-            if (nlen > 5 && strcmp(name + nlen - 5, ".json") == 0)
-            {
-                char device[48];
-                size_t copy_len = nlen - 5;
-                if (copy_len >= sizeof(device)) copy_len = sizeof(device) - 1;
-                memcpy(device, name, copy_len);
-                device[copy_len] = '\0';
-                arr.add(device);
-                count++;
-            }
+            if (!first) json += ",";
+            first = false;
+            json += "{\"name\":\"" + String(f.name()) + "\",\"size\":" + String(f.size()) + "}";
         }
-        entry = dir.openNextFile();
+        f = dir.openNextFile();
     }
-    dir.close();
 
-    char *buf = (char *)psram_malloc(2048);
-    if (!buf)
+    json += "]";
+    size_t len = json.length();
+    char *buf = (char *)psram_malloc(len + 1);
+    if (buf)
     {
-        if (out_len) *out_len = 0;
-        return nullptr;
+        memcpy(buf, json.c_str(), len);
+        buf[len] = '\0';
     }
-
-    size_t json_len = serializeJson(doc, buf, 2048);
-    if (out_len) *out_len = json_len;
+    if (out_len) *out_len = len;
     return buf;
 }
 
-// ─── Delete Register File ───────────────────────────────────────
 bool sd_delete_register_list(const char *device_name)
 {
     if (!sd_initialized) return false;
-
+    fs::FS &fs = sd_fs();
     char path[64];
     snprintf(path, sizeof(path), "/registers/%s.json", device_name);
-
-    if (!SD.exists(path)) return false;
-
-    bool ok = SD.remove(path);
-    if (ok)
-    {
-        sd_refresh_stats();
-        LOG_I("[SD] Deleted %s\n", path);
-    }
-    return ok;
+    return fs.remove(path);
 }
 
-// ─── Browse Directory (list all files/folders in JSON) ──────────
-// Returns JSON: {"path":"/","entries":[{"name":"file.json","size":1234,"is_dir":false},...]}
+// ─── Browse Directory ─────────────────────────────────────────
 char *sd_browse_dir(const char *path, size_t *out_len)
 {
-    if (!sd_initialized)
+    if (!sd_initialized) return nullptr;
+
+    String json = sd_list_dir(path, 0);
+    size_t len = json.length();
+    char *buf = (char *)psram_malloc(len + 1);
+    if (buf)
     {
-        if (out_len) *out_len = 0;
-        return nullptr;
+        memcpy(buf, json.c_str(), len);
+        buf[len] = '\0';
     }
-
-    File dir = SD.open(path);
-    if (!dir || !dir.isDirectory())
-    {
-        if (out_len) *out_len = 0;
-        return nullptr;
-    }
-
-    JsonDocument doc;
-    doc["path"] = path;
-    JsonArray arr = doc.createNestedArray("entries");
-
-    File entry = dir.openNextFile();
-    uint16_t count = 0;
-    while (entry && count < 64)
-    {
-        JsonObject obj = arr.createNestedObject();
-        const char *ename = entry.name();
-        String fullPath = String(ename);
-        int lastSlash = fullPath.lastIndexOf('/');
-        String baseName = (lastSlash >= 0) ? fullPath.substring(lastSlash + 1) : fullPath;
-        obj["name"] = baseName;
-        obj["is_dir"] = entry.isDirectory();
-        if (!entry.isDirectory())
-            obj["size"] = (uint32_t)entry.size();
-        else
-            obj["size"] = 0;
-        entry.close();
-        entry = dir.openNextFile();
-        count++;
-    }
-    dir.close();
-
-    char *buf = (char *)psram_malloc(8192);
-    if (!buf)
-    {
-        if (out_len) *out_len = 0;
-        return nullptr;
-    }
-
-    size_t json_len = serializeJson(doc, buf, 8192);
-    if (out_len) *out_len = json_len;
+    if (out_len) *out_len = len;
     return buf;
 }
 
-// ─── Make Directory ───────────────────────────────────────────────
 bool sd_mkdir(const char *path)
 {
     if (!sd_initialized) return false;
-    if (SD.exists(path)) return true; // already exists
-    bool ok = SD.mkdir(path);
-    if (ok)
-    {
-        sd_refresh_stats();
-        LOG_I("[SD] Created directory: %s\n", path);
-    }
-    else
-    {
-        LOG_E("[SD] Failed to create directory: %s\n", path);
-    }
-    return ok;
+    return sd_fs().mkdir(path);
 }
 
-// ─── Format SD Card ───────────────────────────────────────────────
 bool sd_format()
 {
-    if (!sd_initialized) return false;
-    LOG_I("[SD] Formatting SD card...\n");
-
-    File root = SD.open("/");
-    if (!root) return false;
-
-    String filesToDelete[128];
-    String dirsToDelete[64];
-    int fileCount = 0, dirCount = 0;
-
-    File f = root.openNextFile();
-    while (f && fileCount < 128)
-    {
-        String fpath = String(f.name());
-        if (f.isDirectory())
-        {
-            if (dirCount < 64) dirsToDelete[dirCount++] = fpath;
-        }
-        else
-        {
-            filesToDelete[fileCount++] = fpath;
-        }
-        f.close();
-        f = root.openNextFile();
-    }
-    root.close();
-
-    for (int i = 0; i < fileCount; i++)
-    {
-        SD.remove(filesToDelete[i].c_str());
-        LOG_I("[SD] Deleted file: %s\n", filesToDelete[i].c_str());
-    }
-
-    for (int i = 0; i < dirCount; i++)
-    {
-        File sub = SD.open(dirsToDelete[i].c_str());
-        if (sub)
-        {
-            File sf = sub.openNextFile();
-            while (sf)
-            {
-                String spath = String(sf.name());
-                sf.close();
-                if (!SD.remove(spath.c_str()))
-                {
-                    SD.rmdir(spath.c_str());
-                }
-                sf = sub.openNextFile();
-            }
-            sub.close();
-        }
-        SD.rmdir(dirsToDelete[i].c_str());
-        LOG_I("[SD] Removed dir: %s\n", dirsToDelete[i].c_str());
-    }
-
-    SD.mkdir("/registers");
-
-    sd_refresh_stats();
-    LOG_I("[SD] Format complete\n");
-    return true;
+    // Formatting not supported via Arduino API
+    LOG_E("[SD] Format not supported — use PC to format FAT32\n");
+    return false;
 }
 
-// ─── Write Raw File ───────────────────────────────────────────────
-bool sd_write_file(const char *path, const uint8_t *data, size_t len)
-{
-    if (!sd_initialized) return false;
-
-    if (SD.exists(path))
-        SD.remove(path);
-
-    File f = SD.open(path, FILE_WRITE);
-    if (!f)
-    {
-        LOG_E("[SD] Failed to open %s for write\n", path);
-        return false;
-    }
-
-    size_t written = f.write(data, len);
-    f.close();
-    sd_refresh_stats();
-
-    LOG_I("[SD] Wrote %s — %u bytes\n", path, written);
-    return written == len;
-}
-
-// ─── Read Raw File Content ────────────────────────────────────────
+// ─── File CRUD ────────────────────────────────────────────────
 char *sd_read_file(const char *path, size_t *out_len)
 {
     if (!sd_initialized) return nullptr;
 
-    File f = SD.open(path, FILE_READ);
-    if (!f)
-    {
-        LOG_I("[SD] %s not found\n", path);
-        return nullptr;
-    }
+    fs::FS &fs = sd_fs();
+    File f = fs.open(path, FILE_READ);
+    if (!f) return nullptr;
 
     size_t fsize = f.size();
     if (fsize == 0 || fsize > 65536)
     {
-        LOG_E("[SD] %s: invalid size %u\n", path, fsize);
         f.close();
         return nullptr;
     }
@@ -746,7 +728,6 @@ char *sd_read_file(const char *path, size_t *out_len)
     char *buf = (char *)psram_malloc(fsize + 1);
     if (!buf)
     {
-        LOG_E("[SD] PSRAM alloc failed for %u bytes\n", fsize);
         f.close();
         return nullptr;
     }
@@ -754,96 +735,45 @@ char *sd_read_file(const char *path, size_t *out_len)
     size_t read_bytes = f.readBytes(buf, fsize);
     f.close();
     buf[read_bytes] = '\0';
-
     if (out_len) *out_len = read_bytes;
-    LOG_I("[SD] Read %s — %u bytes\n", path, read_bytes);
     return buf;
 }
 
-// ─── Delete File or Empty Directory ───────────────────────────────
 bool sd_delete_path(const char *path)
 {
     if (!sd_initialized) return false;
-    if (!SD.exists(path)) return false;
-
-    File f = SD.open(path);
-    bool ok;
-    if (f && f.isDirectory())
+    fs::FS &fs = sd_fs();
+    File f = fs.open(path);
+    if (!f) return false;
+    if (f.isDirectory())
     {
         f.close();
-        ok = SD.rmdir(path);
+        return fs.rmdir(path);
     }
-    else
-    {
-        if (f) f.close();
-        ok = SD.remove(path);
-    }
-
-    if (ok)
-    {
-        sd_refresh_stats();
-        LOG_I("[SD] Deleted %s\n", path);
-    }
-    return ok;
+    f.close();
+    return fs.remove(path);
 }
 
-// ─── Append Data to File (for chunked upload) ────────────────────
 bool sd_append_file(const char *path, const uint8_t *data, size_t len)
 {
     if (!sd_initialized) return false;
-
-    File f = SD.open(path, FILE_APPEND);
-    if (!f)
-    {
-        LOG_E("[SD] Failed to open %s for append\n", path);
-        return false;
-    }
-
+    File f = sd_fs().open(path, FILE_APPEND);
+    if (!f) return false;
     size_t written = f.write(data, len);
     f.close();
-
     return written == len;
 }
 
-// ─── Check if File/Dir Exists ─────────────────────────────────────
 bool sd_file_exists(const char *path)
 {
     if (!sd_initialized) return false;
-    return SD.exists(path);
+    return sd_fs().exists(path);
 }
 
-// ─── Remove a Single File (no dir check) ──────────────────────────
 bool sd_remove_file(const char *path)
 {
     if (!sd_initialized) return false;
-    return SD.remove(path);
+    return sd_fs().remove(path);
 }
-
-#else // !USE_SD — Stub implementations (zero code bloat)
-
-bool sd_init(int8_t) { return false; }
-void sd_deinit() {}
-bool sd_is_ok() { return false; }
-bool sd_has_pin_conflict() { return false; }
-bool sd_begin_exclusive() { return false; }
-void sd_end_exclusive() {}
-bool sd_is_exclusive() { return false; }
-uint64_t sd_total_kb() { return 0; }
-uint64_t sd_used_kb() { return 0; }
-const char *sd_type_str() { return "NONE"; }
-void sd_refresh_stats() {}
-bool sd_save_register_list(const char *, const char *, size_t) { return false; }
-char *sd_read_register_list(const char *, size_t *len) { if (len) *len = 0; return nullptr; }
-char *sd_list_register_files(size_t *len) { if (len) *len = 0; return nullptr; }
-bool sd_delete_register_list(const char *) { return false; }
-char *sd_browse_dir(const char *, size_t *len) { if (len) *len = 0; return nullptr; }
-bool sd_mkdir(const char *) { return false; }
-bool sd_format() { return false; }
-bool sd_write_file(const char *, const uint8_t *, size_t) { return false; }
-char *sd_read_file(const char *, size_t *len) { if (len) *len = 0; return nullptr; }
-bool sd_delete_path(const char *) { return false; }
-bool sd_append_file(const char *, const uint8_t *, size_t) { return false; }
-bool sd_file_exists(const char *) { return false; }
-bool sd_remove_file(const char *) { return false; }
 
 #endif // USE_SD

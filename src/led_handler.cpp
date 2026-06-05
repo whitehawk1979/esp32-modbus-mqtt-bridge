@@ -107,12 +107,14 @@ void led_publish_state()
 {
     if (!mqtt_is_connected()) return;
 
-    char payload[128];
+    char payload[160];
+    // HA brightness 0-255 scale (bri_scale:true), store as 0-100 internally
+    uint8_t ha_bri = (uint8_t)((led_brightness_pct * 255 + 50) / 100);
     snprintf(payload, sizeof(payload),
-             "{\"state\":\"%s\",\"color\":{\"r\":%d,\"g\":%d,\"b\":%d},\"brightness\":%d}",
+             "{\"state\":\"%s\",\"color\":{\"r\":%d,\"g\":%d,\"b\":%d},\"brightness\":%d,\"color_mode\":\"rgb\"}",
              led_on ? "ON" : "OFF",
              led_r, led_g, led_b,
-             led_brightness_pct);
+             ha_bri);
 
     mqtt_publish_topic("modbusmqtt/led/state", payload, true);
 }
@@ -123,29 +125,35 @@ void led_setup_discovery()
     if (!mqtt_is_connected()) return;
 
     const char *topic = "homeassistant/light/modbusmqtt_led/config";
-    char payload[512];
-    snprintf(payload, sizeof(payload),
-        "{"
-        "\"name\":\"ESP32 LED\","
-        "\"uniq_id\":\"modbusmqtt_led\","
-        "\"cmd_t\":\"modbusmqtt/led/set\","
-        "\"stat_t\":\"modbusmqtt/led/state\","
-        "\"stat_val_tpl\":\"{{value_json.state}}\","
-        "\"rgb_cmd_t\":\"modbusmqtt/led/set\","
-        "\"rgb_stat_t\":\"modbusmqtt/led/state\","
-        "\"rgb_val_tpl\":\"{{value_json.color.r}},{{value_json.color.g}},{{value_json.color.b}}\","
-        "\"bri_cmd_t\":\"modbusmqtt/led/set\","
-        "\"bri_stat_t\":\"modbusmqtt/led/state\","
-        "\"bri_val_tpl\":\"{{value_json.brightness}}\","
-        "\"bri_scale\":true,"
-        "\"pl_on\":\"ON\","
-        "\"pl_off\":\"OFF\","
-        "\"ret\":true,"
-        "\"dev\":{\"ids\":[\"modbusmqtt_bridge\"],\"name\":\"ESP32 Modbus-MQTT Bridge\",\"mf\":\"Waveshare\",\"mdl\":\"ESP32-S3-ETH\",\"sw\":\"v2.9.1\"}"
-        "}");
 
-    mqtt_publish_topic(topic, payload, true);
-    LOG_I("[LED] HA discovery published\n");
+    JsonDocument doc;
+    doc["schema"] = "json";
+    doc["name"] = "ESP32 LED";
+    doc["uniq_id"] = "modbusmqtt_led";
+    doc["cmd_t"] = "modbusmqtt/led/set";
+    doc["stat_t"] = "modbusmqtt/led/state";
+    doc["stat_val_tpl"] = "{{value_json.state}}";
+    doc["bri_scale"] = true;
+    doc["availability_topic"] = "modbusmqtt/ha_v2/status";
+    doc["payload_available"] = "online";
+    doc["payload_not_available"] = "offline";
+    doc["ret"] = true;
+    doc["color_mode"] = true;
+    JsonArray scm = doc["supported_color_modes"].to<JsonArray>();
+    scm.add("rgb");
+
+    JsonObject dev = doc["dev"].to<JsonObject>();
+    JsonArray ids = dev["ids"].to<JsonArray>();
+    ids.add("modbusmqtt_bridge");
+    dev["name"] = "ESP32 Modbus-MQTT Bridge";
+    dev["mf"] = "Waveshare";
+    dev["mdl"] = "ESP32-S3-ETH";
+    dev["sw"] = "v2.9.1";
+
+    char payload[768];
+    serializeJson(doc, payload, sizeof(payload));
+    bool ok = mqtt_publish_topic(topic, payload, true);
+    LOG_I("[LED] HA discovery %s (%d bytes)\n", ok ? "published" : "FAILED", (int)strlen(payload));
 }
 
 // ─── MQTT Command Handler (to be called from mqtt_handler callback) ──

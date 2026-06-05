@@ -43,7 +43,7 @@
 // ─── Board Pin Definitions (ESP32-S3) ───────────────────────────
 #define PIN_RS485_RX 44  // UART2 RX (Modbus)
 #define PIN_RS485_TX 43  // UART2 TX (Modbus)
-#define PIN_RS485_DE 4   // RS485 Driver Enable (DE/RE)
+#define PIN_RS485_DE 42  // RS485 Driver Enable (DE/RE) — moved from GPIO4 to free SD CS
 #define PIN_STATUS_LED 2 // Built-in LED (GPIO2 — boot/standalone)
 #define PIN_WS2812    21 // WS2812B RGB LED (Waveshare ESP32-S3-ETH V1.0)
 #define PIN_CONFIG_BTN 0 // BOOT button — hold = WiFi config portal
@@ -56,14 +56,13 @@
 #define PIN_ETH_INT 10
 #define PIN_ETH_RST 9
 
-// SD Card (SAME FSPI bus as W5500 — share MISO/MOSI/SCLK, separate CS)
-// Waveshare ESP32-S3-ETH V1.0: SD on SAME FSPI bus as W5500!
-// Schematic confirms: SD_MOSI=GPIO11, SD_MISO=GPIO12, SD_CLK=GPIO13, SD_CS=GPIO4
-// W5500 uses same FSPI: MOSI=11, MISO=12, SCLK=13, CS=14
-// ⚠️ GPIO4 = SD_CS = RS485 DE (hardver ütközés!)
-#define PIN_SD_MOSI 11
-#define PIN_SD_MISO 12
-#define PIN_SD_SCLK 13
+// SD Card (SEPARATE HSPI bus from W5500 FSPI)
+// Waveshare ESP32-S3-ETH V1.0: SD on SPI2 (HSPI), W5500 on FSPI
+// Waveshare official demo confirms: MISO=5, MOSI=6, SCLK=7, CS=4
+// Separate bus from W5500 (which uses MOSI=11,MISO=12,SCLK=13)
+#define PIN_SD_MOSI 6
+#define PIN_SD_MISO 5
+#define PIN_SD_SCLK 7
 #define PIN_SD_CS 4
 
 // ─── Modbus Configuration ──────────────────────────────────────
@@ -470,10 +469,12 @@ const char *di_edge_action_str(uint8_t action);
 const char *di_input_type_str(uint8_t type);
 
 // sd_handler.cpp
-bool sd_init(int8_t cs_pin);
+bool sd_init(int8_t cs_pin);                                  // SPI only (safe)
+bool sd_init(int8_t cs_pin, const char *mode);        // "spi","sdio","auto"
 void sd_deinit();
 bool sd_is_ok();
 bool sd_has_pin_conflict();
+bool sd_is_sdio_mode();
 bool sd_begin_exclusive();
 void sd_end_exclusive();
 bool sd_is_exclusive();

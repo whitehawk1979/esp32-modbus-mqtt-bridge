@@ -26,7 +26,8 @@ enum WebPage
     PG_REGISTERS,
     PG_OTA,
     PG_ADMIN,
-    PG_SD
+    PG_SD,
+    PG_LED
 };
 
 // ─── Shared Base CSS (used by every page) ─────────────────────
@@ -169,6 +170,27 @@ static const char CSS_SD[] PROGMEM = R"rawliteral(
 .confirm-box .btn-row{display:flex;gap:8px;justify-content:center;margin-top:12px}
 )rawliteral";
 
+// ─── LED control page extra CSS ──────────────────────────────
+static const char CSS_LED[] PROGMEM = R"rawliteral(
+.led-preview{width:80px;height:80px;border-radius:50%;margin:10px auto;border:3px solid #30363d;box-shadow:0 0 20px rgba(0,0,0,0.5)}
+.led-controls{display:flex;flex-direction:column;gap:12px;max-width:360px;margin:0 auto}
+.led-row{display:flex;align-items:center;gap:10px;margin:4px 0}
+.led-row label{min-width:90px;color:#8b949e;font-size:14px}
+.led-row input[type=range]{flex:1;accent-color:#58a6ff}
+.led-row .val{min-width:40px;text-align:right;color:#c9d1d9;font-weight:600;font-size:14px}
+.color-picker{width:50px;height:36px;border:1px solid #30363d;border-radius:4px;background:#0d1117;cursor:pointer;padding:2px}
+.preset-grid{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+.preset-btn{width:44px;height:44px;border-radius:50%;border:2px solid #30363d;cursor:pointer;transition:transform 0.15s,border-color 0.15s}
+.preset-btn:hover{transform:scale(1.15);border-color:#58a6ff}
+.toggle-btn{display:inline-block;padding:12px 32px;border-radius:8px;font-size:18px;cursor:pointer;font-weight:700;border:none;margin:8px 4px;transition:background 0.2s}
+.toggle-btn.on{background:#238636;color:white}
+.toggle-btn.off{background:#da3633;color:white}
+.toggle-btn:hover{opacity:0.85}
+.led-info{text-align:center;color:#8b949e;font-size:13px;margin:4px 0}
+.led-section{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;margin:10px 0}
+.led-section h3{color:#58a6ff;font-size:14px;margin:0 0 8px}
+)rawliteral";
+
 // ─── Admin page extra CSS ─────────────────────────────────────
 // Defined inline if needed; placeholder for future extraction
 
@@ -210,6 +232,7 @@ static String navHtml(WebPage active, const String &authSuffix = "")
         {"OTA", "/ota", PG_OTA},
         {"Admin", "/admin", PG_ADMIN},
         {"SD Kártya", "/sd", PG_SD},
+        {"LED", "/led", PG_LED},
     };
 
     for (auto &it : items)

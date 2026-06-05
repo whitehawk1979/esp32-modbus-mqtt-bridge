@@ -1915,6 +1915,7 @@ static void handleApiStatus()
     // SD Card status
     doc["sd_enabled"] = cfg.sd_enabled;
     doc["sd_ok"] = sd_is_ok();
+    doc["sd_mode"] = sd_is_sdio_mode() ? "sdio_1bit" : "spi";
     if (sd_is_ok())
     {
         doc["sd_type"] = sd_type_str();
@@ -2256,7 +2257,7 @@ static void handleApiSdDel()
 }
 
 // ─── SD Enable/Init API ────────────────────────────────────────
-// POST /api/sd/toggle  — enable/disable + init/deinit
+// POST /api/sd/toggle  — enable/disable + init/deinit (SPI only, safe)
 //   ?enabled=1 or ?enabled=0
 static void handleApiSdToggle()
 {
@@ -2275,15 +2276,16 @@ static void handleApiSdToggle()
     cfg.sd_enabled = en;
     if (en)
     {
+        // SAFE: SPI only by default (no crash risk)
         if (sd_init(cfg.pin_sd_cs))
         {
-            LOG_I("[API] SD enabled + initialized\n");
-            WS->send(200, "application/json", "{\"ok\":true,\"sd_ok\":true}");
+            LOG_I("[API] SD enabled + initialized (SPI)\n");
+            WS->send(200, "application/json", "{\"ok\":true,\"sd_ok\":true,\"mode\":\"spi\"}");
         }
         else
         {
-            LOG_E("[API] SD enabled but init FAILED\n");
-            WS->send(200, "application/json", "{\"ok\":true,\"sd_ok\":false}");
+            LOG_E("[API] SD enabled but SPI init FAILED\n");
+            WS->send(200, "application/json", "{\"ok\":true,\"sd_ok\":false,\"mode\":\"spi\"}");
         }
     }
     else
@@ -2292,6 +2294,39 @@ static void handleApiSdToggle()
         LOG_I("[API] SD disabled\n");
         WS->send(200, "application/json", "{\"ok\":true,\"sd_ok\":false}");
     }
+}
+
+// POST /api/sd/init  — init SD with explicit mode (spi / sdio / auto)
+//   ?mode=sdio    = SDIO 1-bit only (NO CS needed)
+//   ?mode=spi     = SPI only (needs CS)
+//   ?mode=auto    = try SDIO first, then SPI
+static void handleApiSdInit()
+{
+    if (!web_auth_ok()) return;
+    String mode = WS->arg("mode");
+    if (mode.length() == 0) mode = "spi";
+    if (mode != "spi" && mode != "sdio" && mode != "auto")
+    {
+        WS->send(400, "application/json", "{\"error\":\"invalid mode, use: spi, sdio, auto\"}");
+        return;
+    }
+
+    if (sd_is_ok())
+    {
+        sd_deinit();
+        delay(100);
+    }
+
+    LOG_I("[API] SD init mode=%s\n", mode.c_str());
+    bool ok = sd_init(cfg.pin_sd_cs, mode.c_str());
+
+    char buf[128];
+    snprintf(buf, sizeof(buf), "{\"ok\":%s,\"sd_ok\":%s,\"mode\":\"%s\",\"sdio\":%s}",
+             ok ? "true" : "false",
+             ok ? "true" : "false",
+             mode.c_str(),
+             sd_is_sdio_mode() ? "true" : "false");
+    WS->send(200, "application/json", buf);
 }
 
 // ─── SD Card Browser Page ────────────────────────────────────
@@ -3108,6 +3143,142 @@ static void handleApiLedSet()
     serializeJson(doc, payload);
     WS->send(200, "application/json", payload);
 }
+
+// GET /led — LED control page (Web UI)
+static void handleLed()
+{
+    if (!web_auth_ok()) return;
+    String authSfx = WS->hasArg("auth") ? ("?auth=" + WS->arg("auth")) : "";
+
+    uint8_t r, g, b;
+    led_get_color(&r, &g, &b);
+    uint8_t bri = led_get_brightness();
+    bool on = led_is_on();
+
+    String html = pageStart(F("LED vezérlés"), CSS_LED) + pageStyleEnd();
+    html += navHtml(PG_LED, authSfx);
+    html += F("<h1>&#127764; WS2812B LED vezérlés</h1>");
+
+    // ── LED preview circle ──
+    char previewColor[32];
+    snprintf(previewColor, sizeof(previewColor), "rgb(%d,%d,%d)", r, g, b);
+    html += F("<div class=\"led-preview\" id=\"preview\" style=\"background:");
+    html += String(on ? previewColor : "#000000");
+    html += F("\"></div>");
+    html += F("<p class=\"led-info\">GPIO");
+    html += String(PIN_WS2812);
+    html += F(" &bull; ");
+    html += String(on ? "<span class=\"on\">BE</span>" : "<span class=\"off\">KI</span>");
+    html += F("</p>");
+
+    // ── ON/OFF toggle ──
+    html += F("<div style=\"text-align:center;margin:8px 0\">");
+    html += F("<button class=\"toggle-btn on\" onclick=\"ledCmd('ON')\">&#9654; BE</button>");
+    html += F("<button class=\"toggle-btn off\" onclick=\"ledCmd('OFF')\">&#9632; KI</button>");
+    html += F("</div>");
+
+    // ── Color sliders ──
+    html += F("<div class=\"led-section\"><h3>&#127912; Szín — RGB csatornák</h3>");
+    html += F("<div class=\"led-controls\">");
+
+    // Red
+    html += F("<div class=\"led-row\"><label>&#128308; Piros</label>");
+    html += F("<input type=\"range\" id=\"sr\" min=\"0\" max=\"255\" value=\"");
+    html += String(r);
+    html += F("\" oninput=\"document.getElementById('vr').textContent=this.value;sendColor()\">");
+    html += F("<span class=\"val\" id=\"vr\">");
+    html += String(r);
+    html += F("</span></div>");
+
+    // Green
+    html += F("<div class=\"led-row\"><label>&#128994; Zöld</label>");
+    html += F("<input type=\"range\" id=\"sg\" min=\"0\" max=\"255\" value=\"");
+    html += String(g);
+    html += F("\" oninput=\"document.getElementById('vg').textContent=this.value;sendColor()\">");
+    html += F("<span class=\"val\" id=\"vg\">");
+    html += String(g);
+    html += F("</span></div>");
+
+    // Blue
+    html += F("<div class=\"led-row\"><label>&#128309; Kék</label>");
+    html += F("<input type=\"range\" id=\"sb\" min=\"0\" max=\"255\" value=\"");
+    html += String(b);
+    html += F("\" oninput=\"document.getElementById('vb').textContent=this.value;sendColor()\">");
+    html += F("<span class=\"val\" id=\"vb\">");
+    html += String(b);
+    html += F("</span></div>");
+
+    // HTML5 color picker
+    char hexColor[8];
+    snprintf(hexColor, sizeof(hexColor), "#%02X%02X%02X", r, g, b);
+    html += F("<div class=\"led-row\"><label>&#127912; Színválasztó</label>");
+    html += F("<input type=\"color\" class=\"color-picker\" id=\"cpick\" value=\"");
+    html += String(hexColor);
+    html += F("\" oninput=\"colorPicked(this.value)\"></div>");
+
+    html += F("</div></div>");
+
+    // ── Brightness ──
+    html += F("<div class=\"led-section\"><h3>&#9728; Fényerő</h3>");
+    html += F("<div class=\"led-controls\">");
+    html += F("<div class=\"led-row\"><label>Fényerő</label>");
+    html += F("<input type=\"range\" id=\"sbri\" min=\"0\" max=\"100\" value=\"");
+    html += String(bri);
+    html += F("\" oninput=\"document.getElementById('vbr').textContent=this.value+'%';sendBri()\">");
+    html += F("<span class=\"val\" id=\"vbr\">");
+    html += String(bri);
+    html += F("%</span></div>");
+    html += F("</div></div>");
+
+    // ── Preset colors ──
+    html += F("<div class=\"led-section\"><h3>&#127748; Előre beállított színek</h3>");
+    html += F("<div class=\"preset-grid\">");
+
+    // Presets: name, r, g, b
+    static const struct { const char *name; uint8_t r, g, b; } presets[] = {
+        {"Piros", 255, 0, 0},
+        {"Narancs", 255, 140, 0},
+        {"Sárga", 255, 255, 0},
+        {"Zöld", 0, 255, 0},
+        {"Cián", 0, 255, 255},
+        {"Kék", 0, 0, 255},
+        {"Lila", 180, 0, 255},
+        {"Rózsaszín", 255, 0, 127},
+        {"Meleg fehér", 255, 200, 150},
+        {"Hideg fehér", 200, 220, 255},
+    };
+    for (auto &p : presets)
+    {
+        char bg[32];
+        snprintf(bg, sizeof(bg), "rgb(%d,%d,%d)", p.r, p.g, p.b);
+        html += F("<button class=\"preset-btn\" style=\"background:");
+        html += String(bg);
+        html += F("\" title=\"");
+        html += FPSTR(p.name);
+        html += F("\" onclick=\"setPreset(");
+        html += String(p.r) + "," + String(p.g) + "," + String(p.b);
+        html += F(")\"></button>");
+    }
+    html += F("</div></div>");
+
+    // ── JavaScript ──
+    html += F("<script>\n");
+    html += F("var authSfx='");
+    html += authSfx;
+    html += F("';\n");
+    html += F("function ledCmd(s){fetch('/api/led/set'+authSfx,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'state='+s}).then(r=>r.json()).then(d=>refreshPreview(d))}\n");
+    html += F("var colorTimer=null;\n");
+    html += F("function sendColor(){if(colorTimer)clearTimeout(colorTimer);colorTimer=setTimeout(doSendColor,120)}\n");
+    html += F("function doSendColor(){var r=document.getElementById('sr').value,g=document.getElementById('sg').value,b=document.getElementById('sb').value;fetch('/api/led/set'+authSfx,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'r='+r+'&g='+g+'&b='+b}).then(r=>r.json()).then(d=>refreshPreview(d))}\n");
+    html += F("function sendBri(){var v=document.getElementById('sbri').value;fetch('/api/led/set'+authSfx,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'brightness='+v}).then(r=>r.json()).then(d=>refreshPreview(d))}\n");
+    html += F("function setPreset(r,g,b){document.getElementById('sr').value=r;document.getElementById('sg').value=g;document.getElementById('sb').value=b;document.getElementById('vr').textContent=r;document.getElementById('vg').textContent=g;document.getElementById('vb').textContent=b;var h='#'+((1<<24)+(r<<16)+(g<<8)+b).toString(16).slice(1);document.getElementById('cpick').value=h;fetch('/api/led/set'+authSfx,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'r='+r+'&g='+g+'&b='+b}).then(r2=>r2.json()).then(d=>refreshPreview(d))}\n");
+    html += F("function colorPicked(hex){var r=parseInt(hex.substr(1,2),16),g=parseInt(hex.substr(3,2),16),b=parseInt(hex.substr(5,2),16);setPreset(r,g,b)}\n");
+    html += F("function refreshPreview(d){var p=document.getElementById('preview');if(d.state==='ON'){p.style.background='rgb('+d.color.r+','+d.color.g+','+d.color.b+')';p.style.boxShadow='0 0 30px rgba('+d.color.r+','+d.color.g+','+d.color.b+',0.6)'}else{p.style.background='#000';p.style.boxShadow='none'}}\n");
+    html += F("</script>");
+
+    html += pageFoot();
+    WS->send(200, "text/html", html);
+}
 #endif
 // Restore: POST JSON → writes NVRAM keys → reboot
 
@@ -3868,6 +4039,7 @@ void web_server_init()
     web.on("/api/sd/read", HTTP_GET, handleApiSdRead);
     web.on("/api/sd/del", HTTP_DELETE, handleApiSdDel);
     web.on("/api/sd/toggle", HTTP_POST, handleApiSdToggle);
+    web.on("/api/sd/init", HTTP_POST, handleApiSdInit);
     // ── SD Card browser page & API ──────────────────────────
     web.on("/sd", HTTP_GET, handleSdCard);
     web.on("/api/sd/browse", HTTP_GET, handleApiSdBrowse);
@@ -3881,6 +4053,7 @@ void web_server_init()
 #ifdef USE_WS2812
     web.on("/api/led", HTTP_GET, handleApiLed);
     web.on("/api/led/set", HTTP_POST, handleApiLedSet);
+    web.on("/led", HTTP_GET, handleLed);
 #endif
 #ifdef USE_SD
     web.on("/api/sd/test", HTTP_GET, handleApiSdTest);
@@ -3928,6 +4101,7 @@ void web_server_init()
     ethWeb.on("/api/sd/read", ETH_HTTP_GET, handleApiSdRead);
     ethWeb.on("/api/sd/del", ETH_HTTP_POST, handleApiSdDel); // POST (ETH server has no HTTP_DELETE)
     ethWeb.on("/api/sd/toggle", ETH_HTTP_POST, handleApiSdToggle);
+    ethWeb.on("/api/sd/init", ETH_HTTP_POST, handleApiSdInit);
     // ── SD Card browser page & API (LAN) ──────────────────
     ethWeb.on("/sd", ETH_HTTP_GET, handleSdCard);
     ethWeb.on("/api/sd/browse", ETH_HTTP_GET, handleApiSdBrowse);
@@ -3941,6 +4115,7 @@ void web_server_init()
 #ifdef USE_WS2812
     ethWeb.on("/api/led", ETH_HTTP_GET, handleApiLed);
     ethWeb.on("/api/led/set", ETH_HTTP_POST, handleApiLedSet);
+    ethWeb.on("/led", ETH_HTTP_GET, handleLed);
 #endif
 #ifdef USE_SD
     ethWeb.on("/api/sd/test", ETH_HTTP_GET, handleApiSdTest);
