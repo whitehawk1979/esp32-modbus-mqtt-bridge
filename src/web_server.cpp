@@ -3516,11 +3516,14 @@ static void handleStorage()
             }
             else
             {
+                bool isJson = name.endsWith(".json");
                 html += "📄 " + htmlEscape(name);
                 html += "</span><span class=\"val\">" + String(size) + " B";
+                if (isJson)
+                    html += " <a href=\"#\" onclick=\"viewJson('" + htmlEscape(fullPath) + "')\" style=\"color:#58a6ff\">📝 Szerkeszt</a>";
                 html += " <a href=\"/api/storage/read?path=" + urlEncode(fullPath) +
                         authSfx + "\" style=\"color:#58a6ff\">⬇</a>";
-                html += " <a href=\"#\" onclick=\"delFile('" + urlEncode(fullPath) + "')\" style=\"color:#f85149\">✕</a>";
+                html += " <a href=\"#\" onclick=\"delFile('" + htmlEscape(fullPath) + "')\" style=\"color:#f85149\">✕</a>";
                 html += "</span>";
             }
             html += "</div>";
@@ -3545,9 +3548,37 @@ static void handleStorage()
     html += F("<button onclick=\"delFile(document.getElementById('delpath').value)\" class=\"btn-warn\">Törlés</button>");
     html += F("</div>");
 
+    // JSON editor modal (hidden by default)
+    html += F("<div id=\"jsonModal\" style=\"display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:1000;overflow:auto\">");
+    html += F("<div style=\"max-width:800px;margin:20px auto;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px\">");
+    html += F("<h2 id=\"jsonTitle\" style=\"color:#58a6ff;margin:0 0 12px\">JSON szerkesztő</h2>");
+    html += F("<textarea id=\"jsonBody\" rows=\"20\" style=\"width:100%;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:8px;font-family:monospace;font-size:13px;tab-size:2;resize:vertical\"></textarea>");
+    html += F("<div style=\"margin-top:8px;display:flex;gap:8px;flex-wrap:wrap\">");
+    html += F("<button onclick=\"saveJson()\" style=\"background:#238636;color:white;padding:8px 16px;border:none;border-radius:6px;cursor:pointer\">💾 Mentés</button>");
+    html += F("<button onclick=\"formatJson()\" style=\"background:#21262d;color:#58a6ff;padding:8px 16px;border:1px solid #30363d;border-radius:6px;cursor:pointer\">📐 Formázás</button>");
+    html += F("<button onclick=\"closeJson()\" style=\"background:#21262d;color:#f85149;padding:8px 16px;border:1px solid #30363d;border-radius:6px;cursor:pointer\">✕ Bezárás</button>");
+    html += F("</div>");
+    html += F("<div id=\"jsonStatus\" style=\"margin-top:8px;font-size:12px;color:#8b949e\"></div>");
+    html += F("</div></div>");
+
     // JavaScript
     html += F("<script>var _auth=(location.search.match(/auth=([^&]+)/)||[])[1]||'';");
     html += F("function qa(){return _auth?'&auth='+_auth:''}");
+    html += F("var _jsonPath='';");
+    html += F("function viewJson(p){_jsonPath=p;");
+    html += F("document.getElementById('jsonTitle').textContent=decodeURIComponent(p);");
+    html += F("document.getElementById('jsonBody').value='Betöltés...';");
+    html += F("document.getElementById('jsonModal').style.display='block';");
+    html += F("document.getElementById('jsonStatus').textContent='';");
+    html += F("fetch('/api/storage/read?path='+encodeURIComponent(p)+qa())");
+    html += F(".then(r=>r.text()).then(t=>{try{var j=JSON.parse(t);document.getElementById('jsonBody').value=JSON.stringify(j,null,2);document.getElementById('jsonStatus').textContent='✅ JSON érvényes ('+t.length+' byte)';document.getElementById('jsonStatus').style.color='#3fb950'}catch(e){document.getElementById('jsonBody').value=t;document.getElementById('jsonStatus').textContent='⚠️ Nem JSON: '+e.message;document.getElementById('jsonStatus').style.color='#d29922'}})");
+    html += F(".catch(e=>{document.getElementById('jsonBody').value='';document.getElementById('jsonStatus').textContent='❌ Hiba: '+e;document.getElementById('jsonStatus').style.color='#f85149'})}");
+    html += F("function saveJson(){var b=document.getElementById('jsonBody').value;");
+    html += F("try{JSON.parse(b)}catch(e){if(!confirm('Hibás JSON! Mentés mégis? ('+e.message+')'))return}");
+    html += F("fetch('/api/storage/write?path='+encodeURIComponent(_jsonPath)+qa(),{method:'POST',headers:{'Content-Type':'application/json'},body:b})");
+    html += F(".then(r=>r.json()).then(d=>{if(d.ok){document.getElementById('jsonStatus').textContent='✅ Mentve!';document.getElementById('jsonStatus').style.color='#3fb950';setTimeout(()=>location.reload(),1000)}else{document.getElementById('jsonStatus').textContent='❌ Hiba: '+(d.error||'');document.getElementById('jsonStatus').style.color='#f85149'}})}");
+    html += F("function formatJson(){var b=document.getElementById('jsonBody').value;try{document.getElementById('jsonBody').value=JSON.stringify(JSON.parse(b),null,2);document.getElementById('jsonStatus').textContent='✅ Formázva';document.getElementById('jsonStatus').style.color='#3fb950'}catch(e){document.getElementById('jsonStatus').textContent='❌ Hibás JSON: '+e.message;document.getElementById('jsonStatus').style.color='#f85149'}}");
+    html += F("function closeJson(){document.getElementById('jsonModal').style.display='none'}");
     html += F("function uploadFile(){var p=document.getElementById('upath').value;");
     html += F("var b=document.getElementById('ubody').value;");
     html += F("fetch('/api/storage/write?path='+encodeURIComponent(p)+qa(),{method:'POST',headers:{'Content-Type':'application/json'},body:b})");
