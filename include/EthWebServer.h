@@ -31,7 +31,7 @@ struct EthRoute
     EthHandler handler;
 };
 
-#define ETH_MAX_ROUTES 50
+#define ETH_MAX_ROUTES 80
 
 // ─── EthernetServer subclass with begin() override ───────────
 class EthEthernetServer : public EthernetServer
@@ -160,6 +160,7 @@ public:
                 else
                     delay(1);
             }
+            _rawBody = body;  // Store raw body for arg("plain")
             _parseArgs(body);
         }
 
@@ -219,6 +220,8 @@ public:
 
     String arg(const String &name) const
     {
+        if (name == "plain" || name == "body")
+            return _rawBody;
         auto it = _args.find(name);
         return (it != _args.end()) ? it->second : "";
     }
@@ -336,6 +339,7 @@ private:
 
     EthRoute _routes[ETH_MAX_ROUTES];
     int _routeCount = 0;
+    String _rawBody;  // Raw POST body for arg("plain")
 
     String _path;
     String _queryString;

@@ -514,6 +514,25 @@ bool modbus_read_register(uint8_t slave_addr, RegType reg_type, uint16_t reg_add
     return true;
 }
 
+// ─── FC16 Write Multiple Registers (proper ModbusMaster API) ───
+// This uses the real FC16 protocol (set transmit buffer + writeMultipleRegisters).
+// Exposed for modbus_write.cpp to call.
+uint8_t modbus_fc16_write_registers(uint8_t slave_addr, uint16_t start_addr,
+                                     uint16_t count, const uint16_t *values)
+{
+    set_slave(slave_addr);
+    mb_stats.tx_count++;
+
+    node.clearTransmitBuffer();
+    for (uint16_t i = 0; i < count && i < 123; i++)
+    {
+        node.setTransmitBuffer(i, values ? values[i] : 0);
+    }
+
+    uint8_t result = node.writeMultipleRegisters(start_addr, count);
+    return result;
+}
+
 // ─── Polling Loop ──────────────────────────────────────────────
 void modbus_poll_loop()
 {

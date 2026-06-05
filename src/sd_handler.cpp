@@ -21,6 +21,7 @@
 #include <SD_MMC.h>
 #include <SD.h>
 #include <SPI.h>
+#include <esp_task_wdt.h>
 
 // ─── State ────────────────────────────────────────────────────
 static bool sd_initialized = false;
@@ -59,23 +60,26 @@ static void w5500_cs_high()
 // ESP32-S3 supports GPIO matrix remap → any GPIO for SDMMC.
 static bool sd_init_sdio()
 {
-    LOG_I("[SD] Trying SDIO 1-bit mode (CLK=7, CMD=6, D0=5)...\n");
+    LOG_I("[SD] Trying SDIO 1-bit mode (CLK=%d, CMD=%d, D0=%d, D1=%d, D2=%d, D3=%d)...\n",
+          PIN_SDIO_CLK, PIN_SDIO_CMD, PIN_SDIO_D0, PIN_SDIO_D1, PIN_SDIO_D2, PIN_SDIO_D3);
 
-    // Set custom GPIO pins for SDMMC (GPIO matrix remap!)
-    // Waveshare board: CLK=7, CMD=6, D0=5 — NOT the ESP32-S3 default IOMUX
-    if (!SD_MMC.setPins(PIN_SD_SCLK, PIN_SD_MOSI, PIN_SD_MISO))
+    // CRITICAL: ESP32-S3 has SOC_SDMMC_USE_GPIO_MATRIX=1 — NO IOMUX defaults!
+    // Must use 6-arg setPins() — 3-arg leaves D1/D2/D3 as -1 which breaks GPIO matrix
+    // SDIO pin mapping: CMD=GPIO4 (same as SPI CS!), D0=GPIO6 (same as SPI MOSI)
+    if (!SD_MMC.setPins(PIN_SDIO_CLK, PIN_SDIO_CMD, PIN_SDIO_D0,
+                         PIN_SDIO_D1, PIN_SDIO_D2, PIN_SDIO_D3))
     {
-        LOG_E("[SD] SD_MMC.setPins() failed!\n");
+        LOG_E("[SD] SD_MMC.setPins(6-arg) failed!\n");
         return false;
     }
-    LOG_I("[SD] SD_MMC.setPins: CLK=%d, CMD=%d, D0=%d\n",
-          PIN_SD_SCLK, PIN_SD_MOSI, PIN_SD_MISO);
+    LOG_I("[SD] SD_MMC.setPins OK: CLK=%d, CMD=%d, D0=%d, D1=%d, D2=%d, D3=%d\n",
+          PIN_SDIO_CLK, PIN_SDIO_CMD, PIN_SDIO_D0, PIN_SDIO_D1, PIN_SDIO_D2, PIN_SDIO_D3);
 
-    // Begin in 1-bit mode, 20 MHz, format_if_mount_failed=false
-    // mountpoint = "/sdcard"
-    if (!SD_MMC.begin("/sdcard", true, false, SDMMC_FREQ_DEFAULT))
+    // Begin in 1-bit mode, 400kHz probe speed first (safer for GPIO matrix)
+    // mode1bit=true, format_if_mount_failed=false, freq=SDMMC_FREQ_PROBING
+    if (!SD_MMC.begin("/sdcard", true, false, SDMMC_FREQ_PROBING))
     {
-        LOG_E("[SD] SD_MMC.begin() 1-bit FAILED\n");
+        LOG_E("[SD] SD_MMC.begin() 1-bit PROBE (400kHz) FAILED\n");
         SD_MMC.end();
         return false;
     }
@@ -110,10 +114,19 @@ static bool sd_init_sdio()
     return true;
 }
 
-// ─── SPI Init (fallback) ───────────────────────────────────────
+// ─── SPI Init — Waveshare official demo method ──────────────────
+// Reference: https://www.waveshare.com/wiki/ESP32-S3-ETH
+//   SPI.begin(SCLK=7, MISO=5, MOSI=6, CS=4)
+//   SD.begin(CS=4)
+// Simple, proven, no HSPI gymnastics needed — Arduino SD library
+// handles SPIClass allocation internally when CS pin matches.
+//
+// RS485 DE = GPIO42 (moved from GPIO4, no conflict with CS)
+// W5500 CS = GPIO14 (keep HIGH during SD transactions)
 static bool sd_init_spi(int8_t cs_pin)
 {
-    LOG_I("[SD] Trying SPI mode (CS=%d, MOSI=6, MISO=5, SCLK=7)...\n", cs_pin);
+    LOG_I("[SD] Waveshare SPI mode: SCLK=%d MISO=%d MOSI=%d CS=%d\n",
+          PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, cs_pin);
 
     if (cs_pin < 0)
     {
@@ -137,41 +150,51 @@ static bool sd_init_spi(int8_t cs_pin)
         sd_pin_conflict = false;
     }
 
-    w5500_cs_high();
-
-    if (!sd_spi)
+    // De-init any previous SD/SD_MMC state
+    if (sd_initialized)
     {
-        sd_spi = new SPIClass(HSPI);
-        if (!sd_spi)
-        {
-            LOG_E("[SD] Failed to allocate SPIClass\n");
-            return false;
-        }
+        if (sd_using_sdio)
+            SD_MMC.end();
+        else
+            SD.end();
+        sd_initialized = false;
+    }
+    if (sd_spi)
+    {
+        delete sd_spi;
+        sd_spi = nullptr;
     }
 
-    pinMode(PIN_SD_MISO, INPUT_PULLUP);
-    sd_spi->begin(PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, cs_pin);
-
-    pinMode(cs_pin, OUTPUT);
-    digitalWrite(cs_pin, HIGH);
-    delay(10);
-
+    // W5500 CS HIGH — prevent bus conflict during SD init
     w5500_cs_high();
 
-    // Try SD.begin at 400 kHz → 1 MHz → 20 kHz
-    if (!SD.begin(cs_pin, *sd_spi, 400000))
+    // ── Waveshare official method ──
+    // 1) SPI.begin(SCLK, MISO, MOSI, CS) — initialise the SPI bus
+    // 2) SD.begin(CS) — mount the card (Arduino SD library manages SPIClass internally)
+    LOG_I("[SD] SPI.begin(%d,%d,%d,%d)...\n", PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, cs_pin);
+    SPI.begin(PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, cs_pin);
+
+    // Small delay for bus stabilisation after SPI.begin
+    delay(50);
+    w5500_cs_high();
+
+    // Try SD.begin at multiple speeds (Waveshare default ~4MHz, fallback to slower)
+    // Per Waveshare: SD.begin(4) with default SPI speed
+    LOG_I("[SD] SD.begin(CS=%d) — attempt 1 (default speed)...\n", cs_pin);
+    if (!SD.begin(cs_pin))
     {
-        LOG_E("[SD] SPI 400kHz failed — trying 1MHz...\n");
+        LOG_E("[SD] SD.begin() default speed FAILED — trying 400kHz...\n");
         delay(100);
         w5500_cs_high();
-        if (!SD.begin(cs_pin, *sd_spi, 1000000))
+        if (!SD.begin(cs_pin, SPI, 400000))
         {
-            LOG_E("[SD] SPI 1MHz failed — trying 20kHz...\n");
+            LOG_E("[SD] SD.begin() 400kHz FAILED — trying 20kHz...\n");
             delay(100);
             w5500_cs_high();
-            if (!SD.begin(cs_pin, *sd_spi, 20000))
+            if (!SD.begin(cs_pin, SPI, 20000))
             {
-                LOG_E("[SD] SPI failed at all speeds\n");
+                LOG_E("[SD] SD.begin() failed at all speeds\n");
+                SPI.end();
                 return false;
             }
         }
@@ -276,159 +299,311 @@ void sd_deinit()
     sd_using_sdio = false;
 }
 
-// ─── SD Test Init (diagnostics) ───────────────────────────────
+// ─── GPIO Pin Diagnostic (non-blocking, NO SD library calls) ──
+// Tests if SD card slot pins have physical connection.
+// If MISO floats HIGH with pull-up → likely no card / no physical CS trace.
+// If CS (GPIO4) can be driven LOW/HIGH → pin is accessible.
+String sd_gpio_diag()
+{
+    String r = "{";
+    r += "\"pin_sd_cs\":" + String(cfg.pin_sd_cs) + ",";
+    r += "\"pin_rs485_de\":" + String(cfg.pin_rs485_de) + ",";
+    r += "\"pin_eth_cs\":" + String(cfg.pin_eth_cs) + ",";
+    r += "\"sd_miso\":" + String(PIN_SD_MISO) + ",";
+    r += "\"sd_mosi\":" + String(PIN_SD_MOSI) + ",";
+    r += "\"sd_sclk\":" + String(PIN_SD_SCLK) + ",";
+    r += "\"sdio_clk\":" + String(PIN_SDIO_CLK) + ",";
+    r += "\"sdio_cmd\":" + String(PIN_SDIO_CMD) + ",";
+    r += "\"sdio_d0\":" + String(PIN_SDIO_D0) + ",";
+    r += "\"sdio_d1\":" + String(PIN_SDIO_D1) + ",";
+
+    modbus_pause();
+
+    // ── Test CS pin (GPIO4) ──
+    int cs = cfg.pin_sd_cs;
+    if (cs >= 0 && cs != cfg.pin_rs485_de)
+    {
+        pinMode(cs, OUTPUT);
+        digitalWrite(cs, HIGH);
+        delay(2);
+        int cs_r_high = digitalRead(cs);
+        digitalWrite(cs, LOW);
+        delay(2);
+        int cs_r_low = digitalRead(cs);
+        r += "\"cs_drive_high\":" + String(cs_r_high) + ",";
+        r += "\"cs_drive_low\":" + String(cs_r_low) + ",";
+        r += "\"cs_controllable\":" + String((cs_r_high == 1 && cs_r_low == 0) ? "true" : "false") + ",";
+        // Leave CS HIGH (deselected)
+        digitalWrite(cs, HIGH);
+    }
+    else if (cs == cfg.pin_rs485_de)
+    {
+        r += "\"cs_conflict_de\":" + String(cs) + "\",";
+    }
+    else
+    {
+        r += "\"cs_not_configured\":true,";
+    }
+
+    // ── Test MISO (GPIO5) with pull-up ──
+    pinMode(PIN_SD_MISO, INPUT_PULLUP);
+    delay(2);
+    int miso_pu = digitalRead(PIN_SD_MISO);
+    // Without pull-up
+    pinMode(PIN_SD_MISO, INPUT);
+    delay(2);
+    int miso_float = digitalRead(PIN_SD_MISO);
+    r += "\"miso_pullup_read\":" + String(miso_pu) + ",";
+    r += "\"miso_float_read\":" + String(miso_float) + ",";
+    // If MISO floats LOW without pull-up → likely connected to card
+    // If MISO reads HIGH with pull-up AND HIGH without → likely floating (no card)
+    r += "\"miso_connected_guess\":" + String((miso_float == 0 || miso_pu != miso_float) ? "true" : "false") + ",";
+
+    // ── Test MOSI (GPIO6) ──
+    pinMode(PIN_SD_MOSI, OUTPUT);
+    digitalWrite(PIN_SD_MOSI, HIGH);
+    delay(2);
+    // Switch to input to read back
+    pinMode(PIN_SD_MOSI, INPUT_PULLUP);
+    delay(2);
+    int mosi_read = digitalRead(PIN_SD_MOSI);
+    r += "\"mosi_readback\":" + String(mosi_read) + ",";
+
+    // ── Test SCLK (GPIO7) ──
+    pinMode(PIN_SD_SCLK, OUTPUT);
+    digitalWrite(PIN_SD_SCLK, LOW);
+    delay(2);
+    pinMode(PIN_SD_SCLK, INPUT_PULLUP);
+    delay(2);
+    int sclk_read = digitalRead(PIN_SD_SCLK);
+    r += "\"sclk_readback\":" + String(sclk_read) + ",";
+
+    // ── Raw SPI CMD0 test (manual, no SD library) ──
+    if (cs >= 0 && cs != cfg.pin_rs485_de)
+    {
+        // Init HSPI for SD
+        if (!sd_spi)
+            sd_spi = new SPIClass(HSPI);
+        pinMode(PIN_SD_MISO, INPUT_PULLUP);
+        sd_spi->begin(PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, cs);
+        w5500_cs_high();
+
+        delay(5);
+        // Send 80 clocks with CS HIGH (card init sequence)
+        sd_spi->beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
+        if (cs >= 0) { pinMode(cs, OUTPUT); digitalWrite(cs, HIGH); }
+        for (int i = 0; i < 10; i++)
+            sd_spi->transfer(0xFF);
+        int miso_idle = digitalRead(PIN_SD_MISO);
+
+        // Assert CS LOW, send CMD0
+        if (cs >= 0) digitalWrite(cs, LOW);
+        delayMicroseconds(1);
+        uint8_t cmd0[] = {0x40, 0x00, 0x00, 0x00, 0x00, 0x95};
+        for (int i = 0; i < 6; i++)
+            sd_spi->transfer(cmd0[i]);
+        uint8_t resp = 0xFF;
+        int attempts = 0;
+        for (attempts = 0; attempts < 32; attempts++)
+        {
+            resp = sd_spi->transfer(0xFF);
+            if (resp != 0xFF) break;
+        }
+        int miso_active = digitalRead(PIN_SD_MISO);
+        sd_spi->endTransaction();
+        if (cs >= 0) { pinMode(cs, OUTPUT); digitalWrite(cs, HIGH); }
+
+        r += "\"miso_idle\":" + String(miso_idle) + ",";
+        r += "\"miso_active\":" + String(miso_active) + ",";
+        r += "\"cmd0_response\":\"0x" + String(resp, HEX) + "\",";
+        r += "\"cmd0_attempts\":" + String(attempts) + ",";
+        r += "\"cmd0_ok\":" + String((resp == 0x01) ? "true" : "false") + ",";
+        // 0xFF = no response (no card or MISO floating)
+        // 0x01 = SD card idle response (CMD0 accepted)
+        r += "\"card_detected\":" + String((resp != 0xFF) ? "true" : "false") + ",";
+    }
+
+    // ── SDIO CMD pin (GPIO4) check ──
+    // SDIO CMD uses GPIO4 same as SPI CS — if no card, CMD line floats
+    {
+        pinMode(PIN_SDIO_CMD, INPUT_PULLUP);
+        delay(2);
+        int cmd_pu = digitalRead(PIN_SDIO_CMD);
+        pinMode(PIN_SDIO_CMD, INPUT);
+        delay(2);
+        int cmd_float = digitalRead(PIN_SDIO_CMD);
+        r += "\"sdio_cmd_pullup\":" + String(cmd_pu) + ",";
+        r += "\"sdio_cmd_float\":" + String(cmd_float) + ",";
+        r += "\"sdio_cmd_connected_guess\":" + String((cmd_float == 0 || cmd_pu != cmd_float) ? "true" : "false") + ",";
+    }
+
+    // ── SDIO D0 (GPIO6) check ──
+    {
+        pinMode(PIN_SDIO_D0, INPUT_PULLUP);
+        delay(2);
+        int d0_pu = digitalRead(PIN_SDIO_D0);
+        pinMode(PIN_SDIO_D0, INPUT);
+        delay(2);
+        int d0_float = digitalRead(PIN_SDIO_D0);
+        r += "\"sdio_d0_pullup\":" + String(d0_pu) + ",";
+        r += "\"sdio_d0_float\":" + String(d0_float) + ",";
+        r += "\"sdio_d0_connected_guess\":" + String((d0_float == 0 || d0_pu != d0_float) ? "true" : "false") + ",";
+    }
+
+    // Restore pin states
+    pinMode(PIN_SD_MISO, INPUT_PULLUP);
+
+    modbus_resume();
+
+    r += "\"ok\":true";
+    r += "}";
+    return r;
+}
+
+// ─── SD Test Init (diagnostics) — WITH TIMEOUT ────────────────
+// NOTE: SD.begin() / SD_MMC.begin() can block for seconds if no card.
+// This version uses FreeRTOS task with watchdog for safety.
 String sd_test_init()
 {
     String result = "{";
     result += "\"pin_sd_cs\":" + String(cfg.pin_sd_cs) + ",";
     result += "\"pin_rs485_de\":" + String(cfg.pin_rs485_de) + ",";
     result += "\"pin_eth_cs\":" + String(cfg.pin_eth_cs) + ",";
-    result += "\"modbus_paused_before\":" + String(modbus_is_paused() ? "true" : "false") + ",";
+    result += "\"gpio4_conflict\":" + String((cfg.pin_sd_cs == 4 && cfg.pin_rs485_de == 4) ? "true" : "false") + ",";
 
     modbus_pause();
-    result += "\"modbus_paused_after\":" + String(modbus_is_paused() ? "true" : "false") + ",";
+    result += "\"modbus_paused\":" + String(modbus_is_paused() ? "true" : "false") + ",";
 
     int cs = cfg.pin_sd_cs;
 
-    // ── Test 1: SDIO 1-bit mode ──
+    // ── Step 1: GPIO diagnostics (fast, non-blocking) ──
+    // Run the raw GPIO + SPI CMD0 test first
+    String gpio_result = sd_gpio_diag();
+    result += "\"gpio_diag\":" + gpio_result + ",";
+
+    // ── Step 2: SDIO 1-bit (with 5s timeout via task) ──
     {
-        bool pins_ok = SD_MMC.setPins(PIN_SD_SCLK, PIN_SD_MOSI, PIN_SD_MISO);
-        result += "\"sdio_set_pins\":" + String(pins_ok ? "true" : "false") + ",";
+        volatile bool sdio_done = false;
+        volatile bool sdio_ok = false;
+        volatile bool sdio_pins_ok = false;
 
-        bool sdio_ok = pins_ok && SD_MMC.begin("/sdcard", true, false, SDMMC_FREQ_DEFAULT);
-        result += "\"sdio_begin\":" + String(sdio_ok ? "true" : "false") + ",";
+        // Use setPins first (fast, non-blocking)
+        sdio_pins_ok = SD_MMC.setPins(PIN_SDIO_CLK, PIN_SDIO_CMD, PIN_SDIO_D0,
+                                       PIN_SDIO_D1, PIN_SDIO_D2, PIN_SDIO_D3);
+        result += "\"sdio_set_pins_6arg\":" + String(sdio_pins_ok ? "true" : "false") + ",";
 
-        if (sdio_ok)
+        if (sdio_pins_ok)
         {
-            sdcard_type_t t = SD_MMC.cardType();
-            const char *tname = (t == CARD_MMC) ? "MMC" : (t == CARD_SD) ? "SDSC" :
-                               (t == CARD_SDHC) ? "SDHC" : "UNKNOWN";
-            result += "\"sdio_card_type\":\"" + String(tname) + "\",";
-            result += "\"sdio_card_size_kb\":" + String(SD_MMC.cardSize() / 1024) + ",";
-            result += "\"sdio_total_kb\":" + String(SD_MMC.totalBytes() / 1024) + ",";
-            result += "\"sdio_used_kb\":" + String(SD_MMC.usedBytes() / 1024) + ",";
-            SD_MMC.end();
-            result += "\"sdio_ok\":true,";
+            // Run SD_MMC.begin in a FreeRTOS task with timeout
+            TaskHandle_t task = nullptr;
+            struct SdioCtx { volatile bool *done; volatile bool *ok; };
+            static SdioCtx ctx = {&sdio_done, &sdio_ok};
+
+            xTaskCreatePinnedToCore([](void *arg) {
+                auto *c = (SdioCtx *)arg;
+                *c->ok = SD_MMC.begin("/sdcard", true, false, SDMMC_FREQ_PROBING);
+                *c->done = true;
+                vTaskDelete(nullptr);
+            }, "sdio_test", 8192, &ctx, 2, &task, 1);
+
+            // Wait up to 5 seconds
+            unsigned long t0 = millis();
+            while (!sdio_done && (millis() - t0) < 5000)
+            {
+                delay(10);
+                esp_task_wdt_reset();
+            }
+
+            if (task && !sdio_done)
+            {
+                // Timeout — kill task
+                LOG_E("[SD] SDIO test timeout — killing task\n");
+                vTaskDelete(task);
+                SD_MMC.end();
+                result += "\"sdio_timeout\":true,";
+            }
+
+            if (sdio_done && sdio_ok)
+            {
+                sdcard_type_t t = SD_MMC.cardType();
+                const char *tname = (t == CARD_MMC) ? "MMC" : (t == CARD_SD) ? "SDSC" :
+                                   (t == CARD_SDHC) ? "SDHC" : "UNKNOWN";
+                result += "\"sdio_card_type\":\"" + String(tname) + "\",";
+                result += "\"sdio_card_size_kb\":" + String(SD_MMC.cardSize() / 1024) + ",";
+                SD_MMC.end();
+                result += "\"sdio_ok\":true,";
+            }
+            else
+            {
+                if (sdio_done) SD_MMC.end();
+                result += "\"sdio_ok\":false,";
+            }
         }
         else
         {
-            SD_MMC.end();
             result += "\"sdio_ok\":false,";
         }
     }
 
-    // ── Test 2: Raw SPI diagnostics ──
+    // ── Step 3: SPI mode (with 5s timeout) ──
+    if (cs >= 0 && cs != cfg.pin_rs485_de)
     {
-        if (cs >= 0)
-        {
-            pinMode(cs, OUTPUT);
-            digitalWrite(cs, HIGH);
-            delay(10);
-            result += "\"cs_high_read\":" + String(digitalRead(cs)) + ",";
-        }
-
-        if (cfg.pin_rs485_de >= 0)
-        {
-            pinMode(cfg.pin_rs485_de, OUTPUT);
-            digitalWrite(cfg.pin_rs485_de, LOW);
-            delay(5);
-            result += "\"de_low_read\":" + String(digitalRead(cfg.pin_rs485_de)) + ",";
-        }
-
         w5500_cs_high();
-
         if (!sd_spi)
             sd_spi = new SPIClass(HSPI);
         pinMode(PIN_SD_MISO, INPUT_PULLUP);
         sd_spi->begin(PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, cs);
-
-        if (cs >= 0)
-        {
-            pinMode(cs, OUTPUT);
-            digitalWrite(cs, HIGH);
-            delay(10);
-            result += "\"cs_high_read2\":" + String(digitalRead(cs)) + ",";
-        }
+        pinMode(cs, OUTPUT);
+        digitalWrite(cs, HIGH);
+        delay(10);
         w5500_cs_high();
 
-        // Raw CMD0 test
-        if (cs >= 0)
+        volatile bool spi_done = false;
+        volatile bool spi_ok = false;
+        struct SpiCtx { volatile bool *done; volatile bool *ok; int cs; SPIClass *spi; };
+        static SpiCtx sctx = {&spi_done, &spi_ok, cs, sd_spi};
+
+        xTaskCreatePinnedToCore([](void *arg) {
+            auto *c = (SpiCtx *)arg;
+            *c->ok = SD.begin(c->cs, *c->spi, 400000);
+            *c->done = true;
+            vTaskDelete(nullptr);
+        }, "spi_test", 8192, &sctx, 2, nullptr, 1);
+
+        unsigned long t0 = millis();
+        while (!spi_done && (millis() - t0) < 5000)
         {
-            sd_spi->beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
-            for (int i = 0; i < 10; i++)
-                sd_spi->transfer(0xFF);
-            int miso_high = digitalRead(PIN_SD_MISO);
-
-            sd_spi->beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
-            digitalWrite(cs, LOW);
-            delayMicroseconds(1);
-            uint8_t cmd0[] = {0x40, 0x00, 0x00, 0x00, 0x00, 0x95};
-            for (int i = 0; i < 6; i++)
-                sd_spi->transfer(cmd0[i]);
-            uint8_t resp = 0xFF;
-            int attempts = 0;
-            for (attempts = 0; attempts < 16; attempts++)
-            {
-                resp = sd_spi->transfer(0xFF);
-                if (resp != 0xFF) break;
-            }
-            int miso_low = digitalRead(PIN_SD_MISO);
-            sd_spi->endTransaction();
-            digitalWrite(cs, HIGH);
-
-            result += "\"miso_high\":" + String(miso_high) + ",";
-            result += "\"miso_low\":" + String(miso_low) + ",";
-            result += "\"cmd0_response\":\"0x" + String(resp, HEX) + "\",";
-            result += "\"cmd0_attempts\":" + String(attempts) + ",";
-            result += "\"cmd0_ok\":" + String((resp == 0x01) ? "true" : "false") + ",";
+            delay(10);
+            esp_task_wdt_reset();
         }
-    }
 
-    // ── Test 3: SPI mode with Waveshare method ──
-    if (cs >= 0)
-    {
-        SPI.begin(PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, cs);
-        pinMode(PIN_SD_MISO, INPUT_PULLUP);
-        bool ok_ws = SD.begin(cs);
-        result += "\"ws_sd_begin\":" + String(ok_ws ? "true" : "false") + ",";
-        if (ok_ws)
+        if (!spi_done)
         {
-            result += "\"ws_card_type\":\"" + String(SD.cardType()) + "\",";
-            result += "\"ws_card_size_kb\":" + String(SD.totalBytes() / 1024) + ",";
-            SD.end();
+            LOG_E("[SD] SPI test timeout — giving up\n");
+            result += "\"spi_timeout\":true,";
         }
-    }
 
-    // SPI with dedicated SPIClass at various speeds
-    if (cs >= 0)
-    {
-        bool ok400 = SD.begin(cs, *sd_spi, 400000);
-        result += "\"sd_begin_400khz\":" + String(ok400 ? "true" : "false") + ",";
-        if (!ok400)
-        {
-            delay(100);
-            w5500_cs_high();
-            bool ok1000 = SD.begin(cs, *sd_spi, 1000000);
-            result += "\"sd_begin_1mhz\":" + String(ok1000 ? "true" : "false") + ",";
-            if (!ok1000)
-            {
-                delay(100);
-                w5500_cs_high();
-                bool ok20000 = SD.begin(cs, *sd_spi, 20000);
-                result += "\"sd_begin_20khz\":" + String(ok20000 ? "true" : "false") + ",";
-            }
-        }
-        else
+        if (spi_done && spi_ok)
         {
             result += "\"spi_card_type\":\"" + String(SD.cardType()) + "\",";
             result += "\"spi_total_kb\":" + String(SD.totalBytes() / 1024) + ",";
             SD.end();
+            result += "\"spi_ok\":true,";
         }
+        else
+        {
+            if (spi_done) SD.end();
+            result += "\"spi_ok\":false,";
+        }
+    }
+    else
+    {
+        result += "\"spi_skipped\":" + String((cs == cfg.pin_rs485_de) ? "\"cs_conflict\"" : "\"no_cs\"") + ",";
     }
 
     modbus_resume();
 
-    result += "\"ok\":" + String(sd_initialized ? "true" : "false") + ",";
+    result += "\"initialized\":" + String(sd_initialized ? "true" : "false") + ",";
     result += "\"mode\":" + String(sd_using_sdio ? "\"sdio_1bit\"" : (sd_initialized ? "\"spi\"" : "\"none\"")) + ",";
     result += "\"pin_conflict\":" + String(sd_pin_conflict ? "true" : "false");
     result += "}";

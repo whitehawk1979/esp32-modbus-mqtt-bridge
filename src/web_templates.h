@@ -27,7 +27,8 @@ enum WebPage
     PG_OTA,
     PG_ADMIN,
     PG_SD,
-    PG_LED
+    PG_LED,
+    PG_STORAGE
 };
 
 // ─── Shared Base CSS (used by every page) ─────────────────────
@@ -79,6 +80,8 @@ button:hover{background:#2ea043}
 static const char CSS_PINS[] PROGMEM = R"rawliteral(
 .warn-box{background:#161b22;border:1px solid #f0883e;border-radius:6px;padding:12px;margin:8px 0}
 .warn-box b{color:#f0883e}
+.error-box{background:#161b22;border:2px solid #f85149;border-radius:6px;padding:12px;margin:8px 0}
+.error-box b{color:#f85149}
 )rawliteral";
 
 // ─── Modules page extra CSS ───────────────────────────────────
@@ -232,6 +235,7 @@ static String navHtml(WebPage active, const String &authSuffix = "")
         {"OTA", "/ota", PG_OTA},
         {"Admin", "/admin", PG_ADMIN},
         {"SD Kártya", "/sd", PG_SD},
+        {"Storage", "/storage", PG_STORAGE},
         {"LED", "/led", PG_LED},
     };
 

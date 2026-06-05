@@ -64,6 +64,19 @@
 #define PIN_SD_MISO 5
 #define PIN_SD_SCLK 7
 #define PIN_SD_CS 4
+// SDIO 1-bit pin mapping (same physical slot, different signal names):
+//   SD_CLK = GPIO7 (same as SPI SCLK)
+//   SD_CMD = GPIO4 (same as SPI CS — NOT MOSI!)
+//   SD_D0  = GPIO6 (same as SPI MOSI)
+//   SD_D1  = GPIO5 (same as SPI MISO)
+// ESP32-S3 requires ALL 6 pins via GPIO matrix (SOC_SDMMC_USE_GPIO_MATRIX=1)
+// D2/D3 not wired to slot — use dummy available GPIOs
+#define PIN_SDIO_CLK  7
+#define PIN_SDIO_CMD  4
+#define PIN_SDIO_D0   6
+#define PIN_SDIO_D1   5
+#define PIN_SDIO_D2   18   // NOT connected to slot (available GPIO)
+#define PIN_SDIO_D3   17   // NOT connected to slot (available GPIO)
 
 // ─── Modbus Configuration ──────────────────────────────────────
 #define MODBUS_BAUD 9600
@@ -109,13 +122,13 @@
 #define MQTT_KEEPALIVE_S 60
 #define MQTT_SOCKET_TIMEOUT 5000
 #define MQTT_MAX_PACKET 2048
-#define OTA_MAX_SIZE 1310720 // 1.25MB max firmware (app0 partition 1280KB - margin)
+#define OTA_MAX_SIZE 3145728 // 3MB max firmware (app0+app1 partition 3MB each)
 #define MQTT_QOS 1
 #define MQTT_RETAIN_STATE true
 #define MQTT_RECONNECT_MS 5000
 
 // ─── Firmware Version ────────────────────────────────────────
-#define FIRMWARE_VERSION "2.9.0" // Register Config, Modbus FC03/FC04, MQTT register publish + HA discovery
+#define FIRMWARE_VERSION "2.11.0" // Scan result API, register scan, FC05 coil write, storage nav fix, OTA_MAX_SIZE 3MB
 
 // ─── TCP Modbus Bridge ─────────────────────────────────────────
 #define TCP_PORT 502
@@ -415,7 +428,7 @@ struct AppConfig
     // GPIO Pins (configurable)
     int8_t pin_rs485_rx;   // UART2 RX (default: 44)
     int8_t pin_rs485_tx;   // UART2 TX (default: 43)
-    int8_t pin_rs485_de;   // RS485 DE/RE (default: 4)
+    int8_t pin_rs485_de;   // RS485 DE/RE (default: 42, was 4 — conflicts with SD CS)
     int8_t pin_status_led; // Status LED (default: 2)
     int8_t pin_config_btn; // Config button (default: 0)
     int8_t pin_eth_mosi;   // W5500 SPI MOSI (default: 11)
@@ -443,6 +456,19 @@ extern uint16_t modules_capacity;
 extern bool scanning_done;
 extern bool scan_active;
 extern uint16_t scan_addr;
+
+// ─── Scan Result Buffer ──────────────────────────────────────
+#define MAX_SCAN_RESULTS 32
+struct ScanResult {
+    uint8_t addr;
+    uint8_t model_id;
+    uint16_t firmware_ver;
+    char model_name[24];
+    bool identified;    // true=identification read OK, false=just responded
+};
+extern ScanResult scan_results[MAX_SCAN_RESULTS];
+extern uint8_t scan_result_count;
+
 extern bool net_connected; // Any network interface connected
 extern String active_ip;   // Current active IP address
 
@@ -478,6 +504,7 @@ bool sd_is_sdio_mode();
 bool sd_begin_exclusive();
 void sd_end_exclusive();
 bool sd_is_exclusive();
+String sd_gpio_diag();
 String sd_test_init();
 uint64_t sd_total_kb();
 uint64_t sd_used_kb();
@@ -524,6 +551,7 @@ bool modbus_write_coil(uint8_t slave, uint8_t coil, bool state);
 bool modbus_write_coils(uint8_t slave, uint8_t count, const bool *states);
 bool modbus_read_di_do_combined(uint8_t slave, uint8_t di_count, uint8_t do_count, bool *di_states, bool *do_states);
 bool modbus_read_register(uint8_t slave_addr, RegType reg_type, uint16_t reg_addr, uint16_t *value);
+uint8_t modbus_fc16_write_registers(uint8_t slave_addr, uint16_t start_addr, uint16_t count, const uint16_t *values);
 uint8_t effective_profile(Slave_Module *mod);
 void modbus_set_timeout_for_module(bool online);
 
@@ -540,6 +568,23 @@ ModbusRawResult modbus_raw_request(uint8_t slave,
                                    uint16_t count_or_value,
                                    uint16_t count2 = 0,
                                    const uint16_t *values = nullptr);
+
+// modbus_write.cpp
+bool modbus_write_register(uint8_t slave_addr, uint16_t reg_addr, uint16_t value);
+bool modbus_write_registers(uint8_t slave_addr, uint16_t start_addr, uint16_t count, const uint16_t *values);
+bool modbus_write_slave_id(uint8_t slave_addr, uint16_t id_register_addr, uint8_t new_id);
+
+// storage_handler.cpp  (-DUSE_STORAGE)
+#ifdef USE_STORAGE
+bool storage_init();
+bool storage_list_dir(const char *path, String &json_output);
+bool storage_read_file(const char *path, String &content);
+bool storage_write_file(const char *path, const char *content, size_t len);
+bool storage_delete_file(const char *path);
+bool storage_exists(const char *path);
+uint64_t storage_total_bytes();
+uint64_t storage_used_bytes();
+#endif
 
 void module_add_from_scan(uint8_t addr, uint8_t model_id);
 void module_add_virtual();

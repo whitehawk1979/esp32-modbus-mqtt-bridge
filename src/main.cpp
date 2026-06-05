@@ -261,6 +261,8 @@ static void update_status_led()
 // ─── Module Auto-Discovery ─────────────────────────────────────
 // ─── Non-blocking Modbus scan (one address per call) ──────────
 uint16_t scan_addr = 0;   // current scan address
+ScanResult scan_results[MAX_SCAN_RESULTS] = {};
+uint8_t scan_result_count = 0;
 bool scan_active = false; // scanning in progress
 
 // ─── Add module from saved list (fast boot) ──────────────────
@@ -336,6 +338,8 @@ void scan_modbus_start()
     scan_active = true;
     module_count = 0;
     modbus_set_timeout(200); // Fast timeout during scan (200ms vs 2000ms)
+    scan_result_count = 0;
+    memset(scan_results, 0, sizeof(scan_results));
     LOG_I("[SCAN] Starting scan %d-%d (profile=%d, timeout=200ms)...\n",
           cfg.mb_scan_start,
           cfg.mb_scan_end,
@@ -402,6 +406,16 @@ static bool scan_modbus_next()
                   model.serial_number);
 
             module_count++;
+
+            // Also add to scan result buffer
+            if (scan_result_count < MAX_SCAN_RESULTS) {
+                ScanResult &sr = scan_results[scan_result_count++];
+                sr.addr = scan_addr;
+                sr.model_id = model.model_id;
+                sr.firmware_ver = model.firmware_ver;
+                strncpy(sr.model_name, model.model_name, sizeof(sr.model_name) - 1);
+                sr.identified = true;
+            }
         }
     }
     scan_addr++;
@@ -818,6 +832,14 @@ static void do_staged_init()
             else
                 LOG_ELN("[INIT] SD FAILED — card present?");
         }
+#endif
+#ifdef USE_STORAGE
+        // ── LittleFS Flash Storage init ──
+        LOG_ILN("[INIT] Flash Storage (LittleFS)...");
+        if (storage_init())
+            LOG_ILN("[INIT] Storage OK");
+        else
+            LOG_ELN("[INIT] Storage FAILED");
 #endif
 #ifdef USE_WS2812
         // ── WS2812B RGB LED init ──

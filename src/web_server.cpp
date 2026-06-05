@@ -721,7 +721,22 @@ static void handleStatus()
         html += "<div class=\"row\"><span class=\"key\">[DBG] mqtt_connected</span><span class=\"val\">" +
                 String(mqtt_is_connected() ? "true" : "false") + "</span></div>";
     }
-    html += "<div class=\"row\"><span class=\"key\">Flash használat</span><span class=\"val\">61%</span></div>";
+    html += "<div class=\"row\"><span class=\"key\">Flash használat</span><span class=\"val\">" +
+            String((ESP.getSketchSize() * 100) / ESP.getFlashChipSize()) + "%</span></div>";
+#ifdef USE_STORAGE
+    {
+        uint64_t st_total = storage_total_bytes();
+        uint64_t st_used  = storage_used_bytes();
+        uint32_t st_total_kb = (uint32_t)(st_total / 1024);
+        uint32_t st_used_kb  = (uint32_t)(st_used / 1024);
+        uint8_t st_pct = st_total > 0 ? (uint8_t)((st_used * 100) / st_total) : 0;
+        html += "<div class=\"row\"><span class=\"key\">Flash Storage (LittleFS)</span><span class=\"val\">" +
+                String(st_used_kb) + " / " + String(st_total_kb) + " KB (" + String(st_pct) + "%)</span></div>";
+        html += "<div class=\"row\"><span class=\"key\"> /profiles /active</span><span class=\"val\"><a href=\"/storage" +
+                (WS->hasArg("auth") ? ("?auth=" + WS->arg("auth")) : "") +
+                "\">📂 Tallózás</a></span></div>";
+    }
+#endif
     html += "</div>";
 
     // Restart button
@@ -1134,8 +1149,17 @@ static void handlePins()
     // ── SD Card (shares FSPI bus with W5500) ──
 #ifdef USE_SD
     html += "<h2>&#128190; SD Kártya</h2>";
-    html += "<div class=\"warn-box\"><b>&#9888; Megosztott SPI busz!</b> W5500 és SD kártya ugyanazt az FSPI buszt "
-            "használja (MOSI=11, MISO=13, SCLK=12). Külön CS: W5500=GPIO10, SD=GPIO42.</div>";
+    html += "<div class=\"warn-box\"><b>&#9888; Külön SPI buszok!</b> "
+            "W5500: FSPI (MOSI=11, MISO=12, SCLK=13, CS=14). "
+            "SD: HSPI (MOSI=6, MISO=5, SCLK=7, CS=4). "
+            "SDIO 1-bit: CLK=7, CMD=4, D0=6, D1=5.</div>";
+    // Check GPIO4 conflict: RS485 DE vs SD CS / SDIO CMD
+    if (cfg.pin_rs485_de == cfg.pin_sd_cs && cfg.pin_sd_cs >= 0)
+    {
+        html += "<div class=\"error-box\"><b>&#128680; GPIO" + String(cfg.pin_sd_cs) +
+                " ütközés!</b> RS485 DE/RE és SD CS ugyanazon a pinen! "
+                "SD használathoz állítsd a DE/RE-t más GPIO-ra (pl. 42).</div>";
+    }
     html += "<div class=\"row\">";
     html += "<div class=\"fm\"><label>SD Engedélyezve</label><select name=\"sdena\">"
             "<option value=\"1\"" + String(cfg.sd_enabled ? " selected" : "") + ">Igen</option>"
@@ -2944,6 +2968,17 @@ static void handleApiLan()
 
 // ─── W5500 Diagnostics API ─────────────────────────────────
 // GET /api/diag — comprehensive W5500 + SD diagnostics
+static void handleApiSdGpio()
+{
+    if (!web_auth_ok()) return;
+#ifdef USE_SD
+    String result = sd_gpio_diag();
+    WS->send(200, "application/json", result);
+#else
+    WS->send(200, "application/json", "{\"error\":\"SD not compiled\"}");
+#endif
+}
+
 static void handleApiSdTest()
 {
     if (!web_auth_ok()) return;
@@ -3051,8 +3086,21 @@ static void handleApiDiag()
     JsonObject sd = doc.createNestedObject("sd");
     sd["enabled"] = cfg.sd_enabled;
     sd["ok"] = sd_is_ok();
+    sd["mode"] = sd_is_sdio_mode() ? "sdio_1bit" : "spi";
     sd["pin_conflict"] = sd_has_pin_conflict();
     sd["exclusive_mode"] = sd_is_exclusive();
+    sd["pin_sd_cs"] = cfg.pin_sd_cs;
+    sd["pin_rs485_de"] = cfg.pin_rs485_de;
+    sd["gpio4_conflict"] = (cfg.pin_sd_cs == cfg.pin_rs485_de && cfg.pin_sd_cs >= 0);
+    JsonObject sd_pins = sd.createNestedObject("pins");
+    sd_pins["spi_sclk"] = PIN_SD_SCLK;
+    sd_pins["spi_mosi"] = PIN_SD_MOSI;
+    sd_pins["spi_miso"] = PIN_SD_MISO;
+    sd_pins["spi_cs"] = cfg.pin_sd_cs;
+    sd_pins["sdio_clk"] = PIN_SDIO_CLK;
+    sd_pins["sdio_cmd"] = PIN_SDIO_CMD;
+    sd_pins["sdio_d0"] = PIN_SDIO_D0;
+    sd_pins["sdio_d1"] = PIN_SDIO_D1;
     if (sd_has_pin_conflict())
     {
         sd["conflict_msg"] = "SD CS és RS485 DE ugyanazon a GPIO-n!";
@@ -3063,6 +3111,14 @@ static void handleApiDiag()
         sd["total_kb"] = sd_total_kb();
         sd["used_kb"] = sd_used_kb();
     }
+
+#ifdef USE_STORAGE
+    // ── Flash Storage (LittleFS) ──
+    JsonObject st = doc.createNestedObject("storage");
+    st["ok"] = storage_exists("/");
+    st["total_kb"] = (uint32_t)(storage_total_bytes() / 1024);
+    st["used_kb"] = (uint32_t)(storage_used_bytes() / 1024);
+#endif
 
     // ── Modbus state ──
     doc["modbus_paused"] = modbus_is_paused();
@@ -3081,7 +3137,249 @@ static void handleApiDiag()
     WS->send(200, "application/json", payload);
 }
 
-// ─── LED API ──────────────────────────────────────────────────
+// ─── Flash Storage API ──────────────────────────────────────
+#ifdef USE_STORAGE
+// GET /api/storage/list?path=/profiles
+static void handleApiStorageList()
+{
+    if (!web_auth_ok()) return;
+    String path = WS->arg("path");
+    if (path.isEmpty()) path = "/";
+    String result;
+    bool ok = storage_list_dir(path.c_str(), result);
+    WS->send(ok ? 200 : 404, "application/json", ok ? result : "{\"error\":\"not found\"}");
+}
+
+// GET /api/storage/read?path=/profiles/nibe.json
+static void handleApiStorageRead()
+{
+    if (!web_auth_ok()) return;
+    String path = WS->arg("path");
+    if (path.isEmpty()) { WS->send(400, "application/json", "{\"error\":\"path required\"}"); return; }
+    String content;
+    bool ok = storage_read_file(path.c_str(), content);
+    WS->send(ok ? 200 : 404, "application/json", ok ? content : "{\"error\":\"file not found\"}");
+}
+
+// POST /api/storage/write?path=/profiles/sabiana.json  (body = JSON content)
+static void handleApiStorageWrite()
+{
+    if (!web_auth_ok()) return;
+    String path = WS->arg("path");
+    if (path.isEmpty()) { WS->send(400, "application/json", "{\"error\":\"path required\"}"); return; }
+    String body = WS->arg("plain");
+    if (body.isEmpty()) body = WS->arg("body");
+    if (body.isEmpty()) { WS->send(400, "application/json", "{\"error\":\"empty body\"}"); return; }
+    bool ok = storage_write_file(path.c_str(), body.c_str(), body.length());
+    WS->send(ok ? 200 : 500, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
+// DELETE /api/storage/delete?path=/profiles/old.json
+static void handleApiStorageDelete()
+{
+    if (!web_auth_ok()) return;
+    String path = WS->arg("path");
+    if (path.isEmpty()) { WS->send(400, "application/json", "{\"error\":\"path required\"}"); return; }
+    bool ok = storage_delete_file(path.c_str());
+    WS->send(ok ? 200 : 404, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+#endif // USE_STORAGE
+
+// ─── Modbus Write API ──────────────────────────────────────
+// POST /api/mb/write?slave=1&reg=255&value=10
+static void handleApiMbWrite()
+{
+    if (!web_auth_ok()) return;
+    uint8_t slave = (uint8_t)WS->arg("slave").toInt();
+    uint16_t reg  = (uint16_t)strtoul(WS->arg("reg").c_str(), nullptr, 0);
+    uint16_t val  = (uint16_t)strtoul(WS->arg("value").c_str(), nullptr, 0);
+    if (slave < 1 || slave > 247) { WS->send(400, "application/json", "{\"error\":\"slave 1-247\"}"); return; }
+
+    bool ok = modbus_write_register(slave, reg, val);
+    JsonDocument doc;
+    doc["ok"] = ok;
+    doc["slave"] = slave;
+    doc["reg"] = reg;
+    doc["value"] = val;
+    if (!ok) doc["error"] = "write failed";
+    String payload;
+    serializeJson(doc, payload);
+    WS->send(ok ? 200 : 500, "application/json", payload);
+}
+
+// POST /api/mb/writeid?slave=1&reg=255&new_id=5
+static void handleApiMbWriteId()
+{
+    if (!web_auth_ok()) return;
+    uint8_t slave  = (uint8_t)WS->arg("slave").toInt();
+    uint16_t reg    = (uint16_t)strtoul(WS->arg("reg").c_str(), nullptr, 0);
+    uint8_t new_id = (uint8_t)WS->arg("new_id").toInt();
+    if (slave < 1 || slave > 247 || new_id < 1 || new_id > 247)
+    {
+        WS->send(400, "application/json", "{\"error\":\"slave and new_id must be 1-247\"}");
+        return;
+    }
+    bool ok = modbus_write_slave_id(slave, reg, new_id);
+    JsonDocument doc;
+    doc["ok"] = ok;
+    doc["old_slave"] = slave;
+    doc["new_id"] = new_id;
+    doc["reg"] = reg;
+    if (!ok) doc["error"] = "ID write/verify failed — power cycle may be needed";
+    String payload;
+    serializeJson(doc, payload);
+    WS->send(ok ? 200 : 500, "application/json", payload);
+}
+
+// GET /api/mb/scan/result — scan progress + found devices
+static void handleApiMbScanResult()
+{
+    if (!web_auth_ok()) return;
+    JsonDocument doc;
+    doc["scan_active"] = scan_active;
+    doc["scan_done"] = scanning_done;
+    doc["scan_progress"] = (scan_addr > cfg.mb_scan_end) ? 100 :
+        (uint8_t)(((uint32_t)(scan_addr - cfg.mb_scan_start) * 100) /
+                  (cfg.mb_scan_end - cfg.mb_scan_start + 1));
+    doc["modules_found"] = scan_result_count;
+
+    JsonArray devices = doc.createNestedArray("devices");
+    for (uint8_t i = 0; i < scan_result_count; i++) {
+        JsonObject d = devices.createNestedObject();
+        d["addr"] = scan_results[i].addr;
+        d["model_id"] = scan_results[i].model_id;
+        d["firmware"] = scan_results[i].firmware_ver;
+        d["model_name"] = scan_results[i].model_name;
+        d["identified"] = scan_results[i].identified;
+    }
+
+    String payload;
+    serializeJson(doc, payload);
+    WS->send(200, "application/json", payload);
+}
+
+// POST /api/mb/scan?start=1&end=247
+static void handleApiMbScan()
+{
+    if (!web_auth_ok()) return;
+    uint8_t start = (uint8_t)WS->arg("start").toInt();
+    uint8_t end   = (uint8_t)WS->arg("end").toInt();
+    if (start < 1) start = 1;
+    if (end > 247 || end < start) end = 247;
+    // Update scan range and trigger scan
+    cfg.mb_scan_start = start;
+    cfg.mb_scan_end = end;
+    scan_modbus_start();
+    JsonDocument doc;
+    doc["ok"] = true;
+    doc["start"] = start;
+    doc["end"] = end;
+    doc["message"] = "Scan started — check /api/diag for progress";
+    String payload;
+    serializeJson(doc, payload);
+    WS->send(200, "application/json", payload);
+}
+
+// GET /api/mb/regscan?slave=1&type=3&start=0&count=20
+// Scans a range of registers on a specific slave and returns all values
+static void handleApiMbRegScan()
+{
+    if (!web_auth_ok()) return;
+    if (modbus_is_paused()) {
+        WS->send(503, "application/json", "{\"ok\":false,\"error\":\"bus_paused\"}");
+        return;
+    }
+
+    uint8_t slave = (uint8_t)WS->arg("slave").toInt();
+    uint8_t fc = (uint8_t)WS->arg("type").toInt();   // 3=FC03 holding, 4=FC04 input
+    uint16_t start = (uint16_t)WS->arg("start").toInt();
+    uint16_t count = (uint16_t)WS->arg("count").toInt();
+
+    if (slave < 1 || slave > 247) {
+        WS->send(400, "application/json", "{\"ok\":false,\"error\":\"invalid_slave\"}");
+        return;
+    }
+    if (fc != 3 && fc != 4) {
+        WS->send(400, "application/json", "{\"ok\":false,\"error\":\"invalid_fc\"}");
+        return;
+    }
+    if (count == 0 || count > 100) count = 20;  // default 20, max 100
+
+    JsonDocument doc;
+    doc["ok"] = true;
+    doc["slave"] = slave;
+    doc["fc"] = fc;
+    doc["start"] = start;
+    doc["count"] = count;
+
+    JsonArray regs = doc.createNestedArray("registers");
+
+    // Read in chunks of 10 registers (Modbus limit for one transaction)
+    uint16_t remaining = count;
+    uint16_t offset = 0;
+    while (remaining > 0) {
+        uint8_t chunk = (remaining > 10) ? 10 : remaining;
+
+        // Use modbus_raw_request for batch read
+        ModbusRawResult result = modbus_raw_request(slave, fc, start + offset, chunk);
+
+        if (result.status != 0x00) {
+            // Error — fill remaining with null
+            for (uint8_t i = 0; i < chunk; i++) {
+                regs.add((char*)nullptr);  // null = could not read
+            }
+        } else {
+            for (uint8_t i = 0; i < result.resp_len && i < chunk; i++) {
+                regs.add(result.resp_buf[i]);
+            }
+            // Pad if fewer results than chunk
+            for (uint8_t i = result.resp_len; i < chunk; i++) {
+                regs.add((char*)nullptr);
+            }
+        }
+        offset += chunk;
+        remaining -= chunk;
+        delay(50); // Small delay between chunks to avoid bus overload
+    }
+
+    String payload;
+    serializeJson(doc, payload);
+    WS->send(200, "application/json", payload);
+}
+
+// POST /api/mb/coil?slave=1&coil=0&state=1
+// FC05 Write Single Coil
+static void handleApiMbCoilWrite()
+{
+    if (!web_auth_ok()) return;
+    if (modbus_is_paused()) {
+        WS->send(503, "application/json", "{\"ok\":false,\"error\":\"bus_paused\"}");
+        return;
+    }
+
+    uint8_t slave = (uint8_t)WS->arg("slave").toInt();
+    uint16_t coil = (uint16_t)WS->arg("coil").toInt();
+    bool state = WS->arg("state").toInt() != 0;
+
+    if (slave < 1 || slave > 247) {
+        WS->send(400, "application/json", "{\"ok\":false,\"error\":\"invalid_slave\"}");
+        return;
+    }
+
+    bool ok = modbus_write_coil(slave, (uint8_t)coil, state);
+
+    JsonDocument doc;
+    doc["ok"] = ok;
+    doc["slave"] = slave;
+    doc["coil"] = coil;
+    doc["state"] = state;
+    if (!ok) doc["error"] = "write_failed";
+
+    String payload;
+    serializeJson(doc, payload);
+    WS->send(ok ? 200 : 500, "application/json", payload);
+}
+
 #ifdef USE_WS2812
 // GET /api/led — current LED state
 static void handleApiLed()
@@ -3143,6 +3441,126 @@ static void handleApiLedSet()
     serializeJson(doc, payload);
     WS->send(200, "application/json", payload);
 }
+
+// ─── Flash Storage Browser Page ────────────────────────────
+#ifdef USE_STORAGE
+static void handleStorage()
+{
+    if (!web_auth_ok()) return;
+    String authSfx = WS->hasArg("auth") ? ("&auth=" + WS->arg("auth")) : "";
+    String curPath = WS->arg("path");
+    if (curPath.isEmpty()) curPath = "/";
+
+    String html;
+    html.reserve(6000);
+    html = pageStart(F("Modbus-MQTT Bridge — Flash Storage"), CSS_STATUS) + pageStyleEnd();
+    html += F("<h1>&#128193; Flash Storage</h1>");
+    html += navHtml(PG_STORAGE, WS->hasArg("auth") ? ("?auth=" + WS->arg("auth")) : "");
+
+    // Storage info card
+    uint64_t st_total = storage_total_bytes();
+    uint64_t st_used  = storage_used_bytes();
+    uint32_t st_total_kb = (uint32_t)(st_total / 1024);
+    uint32_t st_used_kb  = (uint32_t)(st_used / 1024);
+    uint8_t st_pct = st_total > 0 ? (uint8_t)((st_used * 100) / st_total) : 0;
+    html += F("<div class=\"card\"><h2>&#128202; Állapot</h2>");
+    html += "<div class=\"row\"><span class=\"key\">Typus</span><span class=\"val\">LittleFS (Flash)</span></div>";
+    html += "<div class=\"row\"><span class=\"key\">Összes</span><span class=\"val\">" + String(st_total_kb) + " KB</span></div>";
+    html += "<div class=\"row\"><span class=\"key\">Használt</span><span class=\"val\">" + String(st_used_kb) + " KB (" + String(st_pct) + "%)</span></div>";
+    html += "<div class=\"row\"><span class=\"key\">Szabad</span><span class=\"val\">" + String(st_total_kb - st_used_kb) + " KB</span></div>";
+    html += F("</div>");
+
+    // File listing
+    {
+        String heading = F("<div class=\"card\"><h2>&#128193; ");
+        heading += htmlEscape(curPath);
+        heading += F("</h2>");
+        html += heading;
+    }
+    // Back button if not root
+    if (curPath != "/" && curPath != "")
+    {
+        String parent = curPath.substring(0, curPath.lastIndexOf('/'));
+        if (parent.isEmpty()) parent = "/";
+        html += "<div style=\"margin-bottom:8px\"><a href=\"/storage?path=" +
+                urlEncode(parent) + authSfx + "\" style=\"color:#58a6ff\">⬆️ Vissza</a></div>";
+    }
+
+    String listing;
+    bool listOk = storage_list_dir(curPath.c_str(), listing);
+    if (listOk)
+    {
+        // Parse JSON array manually for HTML rendering
+        JsonDocument doc;
+        deserializeJson(doc, listing);
+        JsonArray arr = doc.as<JsonArray>();
+        if (arr.size() == 0)
+        {
+            html += F("<div class=\"row\"><span class=\"key\" style=\"color:#484f58\">Üres könyvtár</span></div>");
+        }
+        for (JsonObject obj : arr)
+        {
+            String name = obj["name"].as<String>();
+            bool isDir  = obj["dir"] | false;
+            uint32_t size = obj["size"] | 0;
+            String fullPath = curPath;
+            if (!fullPath.endsWith("/") && fullPath != "/") fullPath += "/";
+            fullPath += name;
+
+            html += "<div class=\"row\"><span class=\"key\">";
+            if (isDir)
+            {
+                html += "📁 " + htmlEscape(name);
+                html += "</span><span class=\"val\"><a href=\"/storage?path=" + urlEncode(fullPath) +
+                        authSfx + "\" style=\"color:#58a6ff\">Tallózás</a></span>";
+            }
+            else
+            {
+                html += "📄 " + htmlEscape(name);
+                html += "</span><span class=\"val\">" + String(size) + " B";
+                html += " <a href=\"/api/storage/read?path=" + urlEncode(fullPath) +
+                        authSfx + "\" style=\"color:#58a6ff\">⬇</a>";
+                html += " <a href=\"#\" onclick=\"delFile('" + urlEncode(fullPath) + "')\" style=\"color:#f85149\">✕</a>";
+                html += "</span>";
+            }
+            html += "</div>";
+        }
+    }
+    else
+    {
+        html += F("<div class=\"row\"><span class=\"key\" style=\"color:#f85149\">Hiba a könyvtár olvasásakor</span></div>");
+    }
+    html += F("</div>");
+
+    // Upload form
+    html += F("<div class=\"card\"><h2>&#128228; Fájl feltöltés</h2>");
+    html += "<div class=\"fm\"><label>Útvonal: <input id=\"upath\" value=\"/profiles/\" style=\"width:200px\"></label></div>";
+    html += F("<div class=\"fm\"><label>JSON tartalom:<br><textarea id=\"ubody\" rows=\"6\" style=\"width:100%;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:8px\"></textarea></label></div>");
+    html += F("<button onclick=\"uploadFile()\" style=\"margin-top:8px\">Feltöltés</button>");
+    html += F("</div>");
+
+    // Delete form
+    html += F("<div class=\"card\"><h2>&#128465; Fájl törlés</h2>");
+    html += "<div class=\"fm\"><label>Útvonal: <input id=\"delpath\" style=\"width:100%\" placeholder=\"/profiles/old.json\"></label></div>";
+    html += F("<button onclick=\"delFile(document.getElementById('delpath').value)\" class=\"btn-warn\">Törlés</button>");
+    html += F("</div>");
+
+    // JavaScript
+    html += F("<script>var _auth=(location.search.match(/auth=([^&]+)/)||[])[1]||'';");
+    html += F("function qa(){return _auth?'&auth='+_auth:''}");
+    html += F("function uploadFile(){var p=document.getElementById('upath').value;");
+    html += F("var b=document.getElementById('ubody').value;");
+    html += F("fetch('/api/storage/write?path='+encodeURIComponent(p)+qa(),{method:'POST',headers:{'Content-Type':'application/json'},body:b})");
+    html += F(".then(r=>r.json()).then(d=>{alert(d.ok?'Feltöltés OK!':'Hiba: '+(d.error||'ismeretlen'));location.reload()})}");
+    html += F("function delFile(p){if(!confirm('Töröljem: '+p+'?'))return;");
+    html += F("fetch('/api/storage/delete?path='+encodeURIComponent(p)+qa(),{method:'POST'})");
+    html += F(".then(r=>r.json()).then(d=>{alert(d.ok?'Törölve!':'Hiba');location.reload()})}");
+    html += F("</script>");
+
+    html += pageFoot();
+    WS->send(200, "text/html", html);
+}
+#endif // USE_STORAGE
 
 // GET /led — LED control page (Web UI)
 static void handleLed()
@@ -4042,6 +4460,9 @@ void web_server_init()
     web.on("/api/sd/init", HTTP_POST, handleApiSdInit);
     // ── SD Card browser page & API ──────────────────────────
     web.on("/sd", HTTP_GET, handleSdCard);
+#ifdef USE_STORAGE
+    web.on("/storage", HTTP_GET, handleStorage);
+#endif
     web.on("/api/sd/browse", HTTP_GET, handleApiSdBrowse);
     web.on("/api/sd/view", HTTP_GET, handleApiSdView);
     web.on("/api/sd/remove", HTTP_POST, handleApiSdRemove);
@@ -4056,8 +4477,21 @@ void web_server_init()
     web.on("/led", HTTP_GET, handleLed);
 #endif
 #ifdef USE_SD
+    web.on("/api/sd/gpio", HTTP_GET, handleApiSdGpio);
     web.on("/api/sd/test", HTTP_GET, handleApiSdTest);
 #endif
+#ifdef USE_STORAGE
+    web.on("/api/storage/list", HTTP_GET, handleApiStorageList);
+    web.on("/api/storage/read", HTTP_GET, handleApiStorageRead);
+    web.on("/api/storage/write", HTTP_POST, handleApiStorageWrite);
+    web.on("/api/storage/delete", HTTP_POST, handleApiStorageDelete);
+#endif
+    web.on("/api/mb/write", HTTP_POST, handleApiMbWrite);
+    web.on("/api/mb/writeid", HTTP_POST, handleApiMbWriteId);
+    web.on("/api/mb/scan", HTTP_POST, handleApiMbScan);
+    web.on("/api/mb/scan/result", HTTP_GET, handleApiMbScanResult);
+    web.on("/api/mb/regscan", HTTP_GET, handleApiMbRegScan);
+    web.on("/api/mb/coil", HTTP_POST, handleApiMbCoilWrite);
     web.begin();
     LOG_ILN("[WEB] Status & Config server started on port 80");
 
@@ -4104,6 +4538,9 @@ void web_server_init()
     ethWeb.on("/api/sd/init", ETH_HTTP_POST, handleApiSdInit);
     // ── SD Card browser page & API (LAN) ──────────────────
     ethWeb.on("/sd", ETH_HTTP_GET, handleSdCard);
+#ifdef USE_STORAGE
+    ethWeb.on("/storage", ETH_HTTP_GET, handleStorage);
+#endif
     ethWeb.on("/api/sd/browse", ETH_HTTP_GET, handleApiSdBrowse);
     ethWeb.on("/api/sd/view", ETH_HTTP_GET, handleApiSdView);
     ethWeb.on("/api/sd/remove", ETH_HTTP_POST, handleApiSdRemove);
@@ -4118,8 +4555,21 @@ void web_server_init()
     ethWeb.on("/led", ETH_HTTP_GET, handleLed);
 #endif
 #ifdef USE_SD
+    ethWeb.on("/api/sd/gpio", ETH_HTTP_GET, handleApiSdGpio);
     ethWeb.on("/api/sd/test", ETH_HTTP_GET, handleApiSdTest);
 #endif
+#ifdef USE_STORAGE
+    ethWeb.on("/api/storage/list", ETH_HTTP_GET, handleApiStorageList);
+    ethWeb.on("/api/storage/read", ETH_HTTP_GET, handleApiStorageRead);
+    ethWeb.on("/api/storage/write", ETH_HTTP_POST, handleApiStorageWrite);
+    ethWeb.on("/api/storage/delete", ETH_HTTP_POST, handleApiStorageDelete);
+#endif
+    ethWeb.on("/api/mb/write", ETH_HTTP_POST, handleApiMbWrite);
+    ethWeb.on("/api/mb/writeid", ETH_HTTP_POST, handleApiMbWriteId);
+    ethWeb.on("/api/mb/scan", ETH_HTTP_POST, handleApiMbScan);
+    ethWeb.on("/api/mb/scan/result", ETH_HTTP_GET, handleApiMbScanResult);
+    ethWeb.on("/api/mb/regscan", ETH_HTTP_GET, handleApiMbRegScan);
+    ethWeb.on("/api/mb/coil", ETH_HTTP_POST, handleApiMbCoilWrite);
     ethWeb.on("/api/backup", ETH_HTTP_GET, handleApiBackup);
     ethWeb.on("/api/restore", ETH_HTTP_POST, handleApiRestore);
     ethWeb.on("/api/export", ETH_HTTP_GET, handleApiBackup);
