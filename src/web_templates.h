@@ -133,6 +133,10 @@ static const char CSS_MODULES[] PROGMEM = R"rawliteral(
   input[type=text]{font-size:16px!important;padding:8px!important;min-height:38px}
   .room-manage{padding:8px}
   .room-tag{font-size:14px;padding:4px 12px}
+  .room-tags{gap:8px}
+  .room-add{flex-direction:row;gap:8px}
+  .room-add input{min-height:38px}
+  .room-add button{min-height:38px}
 }
 )rawliteral";
 
