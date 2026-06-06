@@ -131,7 +131,7 @@ static const char CSS_MODULES[] PROGMEM = R"rawliteral(
   .elabel{font-size:13px;margin:8px 0 4px}
   select{font-size:14px!important;padding:6px 8px!important;min-height:36px}
   input[type=text]{font-size:16px!important;padding:8px!important;min-height:38px}
-  .room-manage{padding:8px}
+  .room-manage{padding:8px;margin-top:20px;border-top:3px solid #f0883e}
   .room-tag{font-size:14px;padding:4px 12px}
   .room-tags{gap:8px}
   .room-add{flex-direction:row;gap:8px}
