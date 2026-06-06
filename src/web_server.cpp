@@ -1202,9 +1202,10 @@ static void handleModules()
 .room-other{margin-top:4px}
 .room-manage{margin:10px 0;padding:10px;background:#161b22;border:1px solid #30363d;border-radius:8px}
 .room-manage h3{color:#f0883e;font-size:14px;margin:0 0 8px}
-.room-tag{display:inline-flex;align-items:center;gap:4px;background:#21262d;padding:3px 10px;border-radius:4px;margin:2px;font-size:13px;color:#c9d1d9}
-.room-tag button{background:none;color:#f85149;border:none;font-size:16px;cursor:pointer;padding:0 2px}
-.room-add{display:flex;gap:6px;margin-top:6px}
+.room-tags{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
+.room-tag{display:inline-flex;align-items:center;gap:4px;background:#21262d;padding:4px 12px;border-radius:20px;font-size:13px;color:#c9d1d9;white-space:nowrap}
+.room-tag a{color:#f85149;text-decoration:none;font-weight:bold;font-size:16px;line-height:1}
+.room-add{display:flex;gap:6px;margin-top:8px}
 .room-add input{flex:1;padding:6px 8px;font-size:13px}
 .room-add button{padding:6px 12px;font-size:13px}
 .rbtn{display:inline-block;cursor:pointer;padding:3px 10px;border-radius:4px;margin:2px;font-weight:600;font-size:12px;border:none;transition:opacity 0.15s}
@@ -1449,6 +1450,7 @@ function toggleDI(addr,di,curState){
         html += "<p class=\"note\">Az alapértelmezett 15 szoba mindig elérhető. Itt adhatsz hozzá új helyiségeket vagy "
                 "törölheted a meglévőket.</p>";
 
+        html += "<div class=\"room-tags\">";
         if (customRooms.length() > 0)
         {
             int s = 0, e;
@@ -1469,6 +1471,7 @@ function toggleDI(addr,di,curState){
         {
             html += "<p class=\"note\" style=\"color:#484f58\">Még nincs egyéni helyiség hozzáadva.</p>";
         }
+        html += "</div>";
 
         html += "<div class=\"room-add\">";
         html += "<input id=\"newRoom\" placeholder=\"Új helyiség neve\">";
