@@ -944,8 +944,6 @@ static void handleConfig()
     html += "<div style=\"text-align:center;margin:12px 0\"><a href=\"/\" style=\"color:#58a6ff\">← Vissza a státusz "
             "oldalra</a></div>";
 
-    html += "<div class=\"foot\">Modbus-MQTT Bridge v2.0 — ESP32-S3-ETH (6DI+6R) — ESP32-S3</div>";
-
     // JavaScript
     html += R"rawliteral(<script>
 function toggleLan(){document.getElementById('lanSection').style.display=document.getElementById('lanen').checked?'block':'none'}
@@ -953,7 +951,9 @@ function toggleLanStatic(){var d=document.querySelector('input[name=landhcp]:che
 function toggleWifiStatic(){var d=document.querySelector('input[name=wdhcp]:checked').value==='0';document.getElementById('wifiStatic').style.display=d?'block':'none'}
 function toggleTcp(){document.getElementById('tcpSection').style.display=document.getElementById('tcpen').checked?'block':'none'}
 function toggleGeneric(){var p=document.getElementById('mbprof').value;document.getElementById('genericSection').style.display=(p==='2')?'block':'none'}
-</script></body></html>)rawliteral";
+</script>)rawliteral";
+
+    html += pageFoot();
 
     WS->send(200, "text/html", html);
 }
@@ -1182,8 +1182,7 @@ static void handlePins()
 #endif
 
     html += "<button type=\"submit\">&#128190; Mentés & Újraindítás</button></form>";
-    html += "<div class=\"foot\">Modbus-MQTT Bridge v2.0 — ESP32-S3-ETH (6DI+6R) — ESP32-S3</div>";
-    html += "</body></html>";
+    html += pageFoot();
 
     WS->send(200, "text/html", html);
 }
@@ -1505,8 +1504,7 @@ function toggleDI(addr,di,curState){
     html += "}\n";
     html += "if(document.getElementById('scan-bar')){scanTimer=setInterval(updateScan,2000);}\n";
     html += "</script>\n";
-    html += "<div class=\"foot\">Modbus-MQTT Bridge v2.0 — ESP32-S3-ETH (6DI+6R) — ESP32-S3</div>";
-    html += "</body></html>";
+    html += pageFoot();
 
     WS->send(200, "text/html", html);
 }
