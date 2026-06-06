@@ -130,7 +130,7 @@
 #define MQTT_RECONNECT_MS 5000
 
 // ─── Firmware Version ────────────────────────────────────────
-#define FIRMWARE_VERSION "2.12.1" // NIBE S1156-18 PROGMEM profile, KinCony profile header, auto-load
+#define FIRMWARE_VERSION "2.12.2" // Standard page structure for Modules, CSS consolidated into CSS_MODULES
 
 // ─── TCP Modbus Bridge ─────────────────────────────────────────
 #define TCP_PORT 502
