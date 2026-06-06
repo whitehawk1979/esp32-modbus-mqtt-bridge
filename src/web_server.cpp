@@ -3442,6 +3442,129 @@ static void handleApiLedSet()
     WS->send(200, "application/json", payload);
 }
 
+// ─── Modbus Scan Page ────────────────────────────────────────
+static void handleScan()
+{
+    if (!web_auth_ok()) return;
+    String authSfx = WS->hasArg("auth") ? ("&auth=" + WS->arg("auth")) : "";
+    String authQ = WS->hasArg("auth") ? ("?auth=" + WS->arg("auth")) : "";
+
+    String html;
+    html.reserve(8000);
+    html = pageStart(F("Modbus-MQTT Bridge — Scan"), CSS_STATUS) + pageStyleEnd();
+    html += F("<h1>&#128269; Modbus Scan</h1>");
+    html += navHtml(PG_SCAN, authQ);
+
+    // ─── Slave Discovery ───
+    html += F("<div class=\"card\"><h2>&#128225; Slave Discovery</h2>");
+    html += F("<div class=\"fm\"><label>Start cím: <input id=\"scanStart\" type=\"number\" min=\"1\" max=\"247\" value=\"1\" style=\"width:70px\"></label>");
+    html += F("<label>End cím: <input id=\"scanEnd\" type=\"number\" min=\"1\" max=\"247\" value=\"247\" style=\"width:70px\"></label></div>");
+    html += F("<div class=\"fm\"><button onclick=\"startScan()\" id=\"btnScan\">&#9654; Scan indítása</button>");
+    html += F("<button onclick=\"pollScan()\" style=\"margin-left:8px\">&#128260; Frissítés</button></div>");
+    html += F("<div id=\"scanProgress\" style=\"margin-top:8px;color:#8b949e;font-size:13px\"></div>");
+    html += F("<div id=\"scanTable\" style=\"margin-top:12px;display:none\"><table style=\"width:100%;border-collapse:collapse;font-size:13px\">");
+    html += F("<tr style=\"color:#58a6ff;border-bottom:1px solid #30363d\"><th style=\"text-align:left;padding:6px 8px\">Cím</th><th style=\"text-align:left;padding:6px 8px\">Típus</th><th style=\"text-align:left;padding:6px 8px\">Modell</th><th style=\"text-align:left;padding:6px 8px\">FW</th><th style=\"text-align:left;padding:6px 8px\">Azon.</th></tr>");
+    html += F("</table></div>");
+    html += F("</div>");
+
+    // ─── Register Scan ───
+    html += F("<div class=\"card\"><h2>&#128209; Regiszter Scan</h2>");
+    html += F("<div class=\"fm\"><label>Slave: <input id=\"regSlave\" type=\"number\" min=\"1\" max=\"247\" value=\"1\" style=\"width:70px\"></label>");
+    html += F("<label>FC: <select id=\"regFc\" style=\"width:60px\"><option value=\"3\">FC03</option><option value=\"4\">FC04</option></select></label>");
+    html += F("<label>Start: <input id=\"regStart\" type=\"number\" min=\"0\" max=\"65535\" value=\"0\" style=\"width:80px\"></label>");
+    html += F("<label>Count: <input id=\"regCount\" type=\"number\" min=\"1\" max=\"100\" value=\"20\" style=\"width:60px\"></label></div>");
+    html += F("<div class=\"fm\"><button onclick=\"regScan()\">&#128269; Regiszter olvasás</button></div>");
+    html += F("<div id=\"regProgress\" style=\"margin-top:8px;color:#8b949e;font-size:13px\"></div>");
+    html += F("<div id=\"regTable\" style=\"margin-top:12px;display:none\"><table style=\"width:100%;border-collapse:collapse;font-size:13px\">");
+    html += F("<tr style=\"color:#58a6ff;border-bottom:1px solid #30363d\"><th style=\"text-align:left;padding:6px 8px\">Reg</th><th style=\"text-align:left;padding:6px 8px\">Érték</th><th style=\"text-align:left;padding:6px 8px\">Hex</th></tr>");
+    html += F("</table></div>");
+    html += F("</div>");
+
+    // ─── Write Slave ID ───
+    html += F("<div class=\"card\"><h2>&#9999; Slave ID írás (FC06)</h2>");
+    html += F("<div class=\"fm\"><label>Jelenlegi cím: <input id=\"writeOldAddr\" type=\"number\" min=\"1\" max=\"247\" value=\"1\" style=\"width:70px\"></label>");
+    html += F("<label>Új cím: <input id=\"writeNewAddr\" type=\"number\" min=\"1\" max=\"247\" value=\"1\" style=\"width:70px\"></label></div>");
+    html += F("<button onclick=\"writeSlaveId()\" class=\"btn-warn\" style=\"margin-top:4px\">&#9999; ID írása</button>");
+    html += F("<div id=\"writeStatus\" style=\"margin-top:8px;font-size:13px\"></div>");
+    html += F("</div>");
+
+    // ─── Write Coil (FC05) ───
+    html += F("<div class=\"card\"><h2>&#9889; Coil írás (FC05)</h2>");
+    html += F("<div class=\"fm\"><label>Slave: <input id=\"coilSlave\" type=\"number\" min=\"1\" max=\"247\" value=\"1\" style=\"width:70px\"></label>");
+    html += F("<label>Coil: <input id=\"coilAddr\" type=\"number\" min=\"0\" max=\"65535\" value=\"0\" style=\"width:80px\"></label>");
+    html += F("<label>Állapot: <select id=\"coilState\" style=\"width:60px\"><option value=\"1\">ON</option><option value=\"0\">OFF</option></select></label></div>");
+    html += F("<button onclick=\"writeCoil()\" class=\"btn-warn\" style=\"margin-top:4px\">&#9889; Coil írása</button>");
+    html += F("<div id=\"coilStatus\" style=\"margin-top:8px;font-size:13px\"></div>");
+    html += F("</div>");
+
+    // ─── JavaScript ───
+    html += F("<script>var _auth=(location.search.match(/auth=([^&]+)/)||[])[1]||'';");
+    html += F("function qa(){return _auth?'&auth='+_auth:''}");
+    // Slave discovery
+    html += F("function startScan(){");
+    html += F("var s=document.getElementById('scanStart').value||1;");
+    html += F("var e=document.getElementById('scanEnd').value||247;");
+    html += F("document.getElementById('scanProgress').textContent='Scan indítása...';");
+    html += F("document.getElementById('btnScan').disabled=true;");
+    html += F("fetch('/api/mb/scan?start='+s+'&end='+e+qa(),{method:'POST'}).then(r=>r.json()).then(d=>{");
+    html += F("if(d.ok){document.getElementById('scanProgress').textContent='Folyamatban... (1-247)';setTimeout(pollScan,2000)}");
+    html += F("else{document.getElementById('scanProgress').textContent='Hiba: '+(d.error||'ismeretlen');document.getElementById('btnScan').disabled=false}");
+    html += F("})}");
+    html += F("function pollScan(){");
+    html += F("fetch('/api/mb/scan/result'+(_auth?'?auth='+_auth:'')).then(r=>r.json()).then(d=>{");
+    html += F("var p=document.getElementById('scanProgress');");
+    html += F("p.textContent=d.scan_active?'&#128260; Scanning... ('+d.scan_progress+'%)':('&#10003; Kész — '+d.modules_found+' eszköz találva');");
+    html += F("if(!d.scan_active)document.getElementById('btnScan').disabled=false;");
+    html += F("var tb=document.getElementById('scanTable');");
+    html += F("if(d.devices&&d.devices.length>0){");
+    html += F("var h='<tr style=\"color:#58a6ff;border-bottom:1px solid #30363d\"><th style=\"text-align:left;padding:6px 8px\">Cím</th><th style=\"text-align:left;padding:6px 8px\">Típus</th><th style=\"text-align:left;padding:6px 8px\">Modell</th><th style=\"text-align:left;padding:6px 8px\">FW</th><th style=\"text-align:left;padding:6px 8px\">Azon.</th></tr>';");
+    html += F("d.devices.forEach(function(dev){");
+    html += F("h+='<tr style=\"border-bottom:1px solid #21262d\"><td style=\"padding:6px 8px\">'+dev.addr+'</td><td style=\"padding:6px 8px\">'+(dev.model_id||'-')+'</td><td style=\"padding:6px 8px\">'+(dev.model_name||'-')+'</td><td style=\"padding:6px 8px\">'+(dev.firmware||'-')+'</td><td style=\"padding:6px 8px\">'+(dev.identified?\"&#10003;\":\"&#10060;\")+'</td></tr>'");
+    html += F("});tb.querySelector('table').innerHTML=h;tb.style.display='block'}");
+    html += F("if(d.scan_active)setTimeout(pollScan,1000)");
+    html += F("})}");
+
+    // Register scan
+    html += F("function regScan(){");
+    html += F("var sl=document.getElementById('regSlave').value;");
+    html += F("var fc=document.getElementById('regFc').value;");
+    html += F("var st=document.getElementById('regStart').value;");
+    html += F("var ct=document.getElementById('regCount').value;");
+    html += F("document.getElementById('regProgress').textContent='Olvasás...';");
+    html += F("fetch('/api/mb/regscan?slave='+sl+'&type='+fc+'&start='+st+'&count='+ct+(_auth?'&auth='+_auth:'')).then(r=>r.json()).then(d=>{");
+    html += F("if(!d.ok){document.getElementById('regProgress').textContent='Hiba: '+(d.error||'ismeretlen');return}");
+    html += F("document.getElementById('regProgress').textContent='Slave '+d.slave+', FC0'+d.fc+', Reg '+d.start+'-'+(d.start+d.count-1)+', '+d.registers.length+' regiszter';");
+    html += F("var h='<tr style=\"color:#58a6ff;border-bottom:1px solid #30363d\"><th style=\"text-align:left;padding:6px 8px\">Reg</th><th style=\"text-align:left;padding:6px 8px\">Érték</th><th style=\"text-align:left;padding:6px 8px\">Hex</th></tr>';");
+    html += F("d.registers.forEach(function(v,i){");
+    html += F("var reg=d.start+i;var hx=v!==null?'0x'+v.toString(16).toUpperCase():'-';var vv=v!==null?v:'null';");
+    html += F("h+='<tr style=\"border-bottom:1px solid #21262d\"><td style=\"padding:6px 8px\">'+reg+'</td><td style=\"padding:6px 8px\">'+vv+'</td><td style=\"padding:6px 8px;color:#8b949e\">'+hx+'</td></tr>'");
+    html += F("});document.getElementById('regTable').querySelector('table').innerHTML=h;document.getElementById('regTable').style.display='block'");
+    html += F("})}");
+
+    // Write slave ID
+    html += F("function writeSlaveId(){");
+    html += F("var oldA=document.getElementById('writeOldAddr').value;var newA=document.getElementById('writeNewAddr').value;");
+    html += F("if(!confirm('Biztosan módosítod a '+oldA+' címről '+newA+'-re?'))return;");
+    html += F("document.getElementById('writeStatus').textContent='Írás...';");
+    html += F("fetch('/api/mb/writeid?old='+oldA+'&new='+newA+qa(),{method:'POST'}).then(r=>r.json()).then(d=>{");
+    html += F("document.getElementById('writeStatus').textContent=d.ok?'&#10003; ID módosítva!':'&#10060; Hiba: '+(d.error||'ismeretlen')");
+    html += F("})}");
+
+    // Write coil
+    html += F("function writeCoil(){");
+    html += F("var sl=document.getElementById('coilSlave').value;var ca=document.getElementById('coilAddr').value;var st=document.getElementById('coilState').value;");
+    html += F("if(!confirm('Biztosan írod a coil-t? Slave '+sl+', Coil '+ca+', State '+st))return;");
+    html += F("document.getElementById('coilStatus').textContent='Írás...';");
+    html += F("fetch('/api/mb/coil?slave='+sl+'&coil='+ca+'&state='+st+qa(),{method:'POST'}).then(r=>r.json()).then(d=>{");
+    html += F("document.getElementById('coilStatus').textContent=d.ok?'&#10003; Coil írva!':'&#10060; Hiba: '+(d.error||'ismeretlen')");
+    html += F("})}");
+
+    html += F("</script>");
+
+    html += pageFoot();
+    WS->send(200, "text/html", html);
+}
+
 // ─── Flash Storage Browser Page ────────────────────────────
 #ifdef USE_STORAGE
 static void handleStorage()
@@ -4494,6 +4617,7 @@ void web_server_init()
 #ifdef USE_STORAGE
     web.on("/storage", HTTP_GET, handleStorage);
 #endif
+    web.on("/scan", HTTP_GET, handleScan);
     web.on("/api/sd/browse", HTTP_GET, handleApiSdBrowse);
     web.on("/api/sd/view", HTTP_GET, handleApiSdView);
     web.on("/api/sd/remove", HTTP_POST, handleApiSdRemove);
@@ -4572,6 +4696,7 @@ void web_server_init()
 #ifdef USE_STORAGE
     ethWeb.on("/storage", ETH_HTTP_GET, handleStorage);
 #endif
+    ethWeb.on("/scan", ETH_HTTP_GET, handleScan);
     ethWeb.on("/api/sd/browse", ETH_HTTP_GET, handleApiSdBrowse);
     ethWeb.on("/api/sd/view", ETH_HTTP_GET, handleApiSdView);
     ethWeb.on("/api/sd/remove", ETH_HTTP_POST, handleApiSdRemove);

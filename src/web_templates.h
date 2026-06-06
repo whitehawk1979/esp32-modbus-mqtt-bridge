@@ -28,7 +28,8 @@ enum WebPage
     PG_ADMIN,
     PG_SD,
     PG_LED,
-    PG_STORAGE
+    PG_STORAGE,
+    PG_SCAN
 };
 
 // ─── Shared Base CSS (used by every page) ─────────────────────
@@ -236,6 +237,7 @@ static String navHtml(WebPage active, const String &authSuffix = "")
         {"Admin", "/admin", PG_ADMIN},
         {"SD Kártya", "/sd", PG_SD},
         {"Storage", "/storage", PG_STORAGE},
+        {"Scan", "/scan", PG_SCAN},
         {"LED", "/led", PG_LED},
     };
 
