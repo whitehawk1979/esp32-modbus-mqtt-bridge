@@ -120,6 +120,22 @@ static const char CSS_MODULES[] PROGMEM = R"rawliteral(
 .mod-section{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:10px;margin:8px 0}
 .mod-section-title{color:#f0883e;font-size:13px;font-weight:600;margin:0 0 6px;display:flex;align-items:center;gap:4px}
 .entity-row{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0;align-items:center}
+.fm-sm{flex:0 0 calc(33% - 4px);min-width:80px}
+.fm-sm label{display:block;color:#8b949e;font-size:11px;margin-bottom:2px}
+.fm-sm input{width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:4px 6px;border-radius:4px;font-size:13px}
+.room-other{margin-top:4px}
+.room-manage{margin:24px 0 0;padding:12px;background:#161b22;border:1px solid #30363d;border-radius:8px;border-top:3px solid #f0883e;clear:both;width:100%}
+.room-manage h3{color:#f0883e;font-size:14px;margin:0 0 8px}
+.room-tags{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
+.room-tag{display:inline-flex;align-items:center;gap:4px;background:#21262d;padding:4px 12px;border-radius:20px;font-size:13px;color:#c9d1d9;white-space:nowrap}
+.room-tag a{color:#f85149;text-decoration:none;font-weight:bold;font-size:16px;line-height:1}
+.room-add{display:flex;gap:6px;margin-top:8px}
+.room-add input{flex:1;padding:6px 8px;font-size:13px}
+.room-add button{padding:6px 12px;font-size:13px}
+.rbtn{display:inline-block;cursor:pointer;padding:3px 10px;border-radius:4px;margin:2px;font-weight:600;font-size:12px;border:none;transition:opacity 0.15s}
+.rbtn:active{opacity:0.6}
+.rbtn.on{background:#238636;color:white}
+.rbtn.off{background:#f851494d;color:#f85149;border:1px solid #f8514940}
 @media(max-width:768px){
   .mod-card{padding:10px 8px}
   .mrow{flex-direction:column;gap:4px}

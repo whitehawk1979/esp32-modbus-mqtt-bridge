@@ -1194,82 +1194,69 @@ static void handleModules()
         return;
     String html;
     html.reserve(8000); // Largest page, many card loops
-    html = pageStart(F("Modbus-MQTT Bridge — Modulok"), CSS_MODULES) + FPSTR(CSS_FORMS) + R"rawliteral(
-.fm-sm{flex:0 0 calc(33% - 4px);min-width:80px}
-.fm-sm label{display:block;color:#8b949e;font-size:11px;margin-bottom:2px}
-.fm-sm input{width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:4px 6px;border-radius:4px;font-size:13px}
-.room-other{margin-top:4px}
-.room-manage{margin:24px 0 0;padding:12px;background:#161b22;border:1px solid #30363d;border-radius:8px;border-top:3px solid #f0883e;clear:both;width:100%}
-.room-manage h3{color:#f0883e;font-size:14px;margin:0 0 8px}
-.room-tags{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
-.room-tag{display:inline-flex;align-items:center;gap:4px;background:#21262d;padding:4px 12px;border-radius:20px;font-size:13px;color:#c9d1d9;white-space:nowrap}
-.room-tag a{color:#f85149;text-decoration:none;font-weight:bold;font-size:16px;line-height:1}
-.room-add{display:flex;gap:6px;margin-top:8px}
-.room-add input{flex:1;padding:6px 8px;font-size:13px}
-.room-add button{padding:6px 12px;font-size:13px}
-.rbtn{display:inline-block;cursor:pointer;padding:3px 10px;border-radius:4px;margin:2px;font-weight:600;font-size:12px;border:none;transition:opacity 0.15s}
-.rbtn:active{opacity:0.6}
-.rbtn.on{background:#238636;color:white}
-.rbtn.off{background:#f851494d;color:#f85149;border:1px solid #f8514940}
-</style>
-<script>
-var _auth=(location.search.match(/auth=([^&]+)/)||[])[1]||'';
-function setDiRelay(addr,di,val){
-  var q='/api/direlay?addr='+addr+'&d'+di+'='+val;
-  if(_auth)q+='&auth='+_auth;
-  fetch(q,{method:'POST'})
-  .then(r=>r.json())
-  .then(d=>{if(!d.ok)alert('Hiba a mentésnél');})
-  .catch(e=>{alert('Hálózati hiba');});
-}
-function roomChanged(sel){
-  var other=sel.parentElement.querySelector('.room-other');
-  if(!other)other=sel.nextElementSibling;
-  if(other)other.style.display=sel.value==='_other'?'block':'none';
-}
-function toggleRelay(addr,relay,curState){
-  var newState=curState?0:1;
-  var btn=document.getElementById('r'+addr+'_'+relay);
-  if(!btn)return;
-  btn.style.opacity='0.5';
-  fetch('/relay?addr='+addr+'&relay='+relay+'&state='+newState)
-  .then(r=>r.json())
-  .then(d=>{
-    if(d.ok){
-      btn.textContent='R'+(relay+1)+' '+(newState?'ON':'OFF');
-      btn.className='rbtn '+(newState?'on':'off');
-      btn.onclick=function(){toggleRelay(addr,relay,newState);};
-    }else{
-      alert('Hiba: '+(d.error||'ismeretlen'));
-    }
-    btn.style.opacity='1';
-  })
-  .catch(e=>{alert('Hálózati hiba');btn.style.opacity='1';});
-}
-function toggleDI(addr,di,curState){
-  var newState=curState?0:1;
-  var btn=document.getElementById('d'+addr+'_'+di);
-  if(!btn)return;
-  btn.style.opacity='0.5';
-  fetch('/di?addr='+addr+'&di='+di+'&state='+newState)
-  .then(r=>r.json())
-  .then(d=>{
-    if(d.ok){
-      btn.textContent='DI'+(di+1)+' '+(newState?'ON':'OFF');
-      btn.className='rbtn '+(newState?'on':'off');
-      btn.onclick=function(){toggleDI(addr,di,newState);};
-    }else{
-      alert('Hiba: '+(d.error||'ismeretlen'));
-    }
-    btn.style.opacity='1';
-  })
-  .catch(e=>{alert('Hálózati hiba');btn.style.opacity='1';});
-}
-</script>
-</head><body>)rawliteral";
+    // Standard structure: pageStart + pageStyleEnd (like all other pages)
+    html = pageStart(F("Modbus-MQTT Bridge — Modulok"), CSS_MODULES) + FPSTR(CSS_FORMS) + pageStyleEnd();
+
+    // Sidebar navigation
+    html += navHtml(PG_MODULES, WS->hasArg("auth") ? ("?auth=" + WS->arg("auth")) : "");
+
+    // JavaScript functions (in body, before content — referenced by onclick handlers)
+    html += F("<script>\n"
+              "var _auth=(location.search.match(/auth=([^&]+)/)||[])[1]||'';\n"
+              "function setDiRelay(addr,di,val){\n"
+              "  var q='/api/direlay?addr='+addr+'&d'+di+'='+val;\n"
+              "  if(_auth)q+='&auth='+_auth;\n"
+              "  fetch(q,{method:'POST'})\n"
+              "  .then(r=>r.json())\n"
+              "  .then(d=>{if(!d.ok)alert('Hiba a mentésnél');})\n"
+              "  .catch(e=>{alert('Hálózati hiba');});\n"
+              "}\n"
+              "function roomChanged(sel){\n"
+              "  var other=sel.parentElement.querySelector('.room-other');\n"
+              "  if(!other)other=sel.nextElementSibling;\n"
+              "  if(other)other.style.display=sel.value==='_other'?'block':'none';\n"
+              "}\n"
+              "function toggleRelay(addr,relay,curState){\n"
+              "  var newState=curState?0:1;\n"
+              "  var btn=document.getElementById('r'+addr+'_'+relay);\n"
+              "  if(!btn)return;\n"
+              "  btn.style.opacity='0.5';\n"
+              "  fetch('/relay?addr='+addr+'&relay='+relay+'&state='+newState)\n"
+              "  .then(r=>r.json())\n"
+              "  .then(d=>{\n"
+              "    if(d.ok){\n"
+              "      btn.textContent='R'+(relay+1)+' '+(newState?'ON':'OFF');\n"
+              "      btn.className='rbtn '+(newState?'on':'off');\n"
+              "      btn.onclick=function(){toggleRelay(addr,relay,newState);};\n"
+              "    }else{\n"
+              "      alert('Hiba: '+(d.error||'ismeretlen'));\n"
+              "    }\n"
+              "    btn.style.opacity='1';\n"
+              "  })\n"
+              "  .catch(e=>{alert('Hálózati hiba');btn.style.opacity='1';});\n"
+              "}\n"
+              "function toggleDI(addr,di,curState){\n"
+              "  var newState=curState?0:1;\n"
+              "  var btn=document.getElementById('d'+addr+'_'+di);\n"
+              "  if(!btn)return;\n"
+              "  btn.style.opacity='0.5';\n"
+              "  fetch('/di?addr='+addr+'&di='+di+'&state='+newState)\n"
+              "  .then(r=>r.json())\n"
+              "  .then(d=>{\n"
+              "    if(d.ok){\n"
+              "      btn.textContent='DI'+(di+1)+' '+(newState?'ON':'OFF');\n"
+              "      btn.className='rbtn '+(newState?'on':'off');\n"
+              "      btn.onclick=function(){toggleDI(addr,di,newState);};\n"
+              "    }else{\n"
+              "      alert('Hiba: '+(d.error||'ismeretlen'));\n"
+              "    }\n"
+              "    btn.style.opacity='1';\n"
+              "  })\n"
+              "  .catch(e=>{alert('Hálózati hiba');btn.style.opacity='1';});\n"
+              "}\n"
+              "</script>\n");
 
     html += F("<h1>&#128268; Modbus Modulok</h1>");
-    html += navHtml(PG_MODULES, WS->hasArg("auth") ? ("?auth=" + WS->arg("auth")) : "");
 
     if (!scan_active)
     {
