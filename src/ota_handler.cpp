@@ -16,6 +16,7 @@
 #include <esp_task_wdt.h>
 #include "modbus_mqtt_ha_bridge.h"
 #include "ota_handler.h"
+#include "web_templates.h"
 
 // ─── External web server (from web_server.cpp) ────────────────
 extern WebServer web;
@@ -26,129 +27,138 @@ extern WebServer web;
 // ─── OTA Page ─────────────────────────────────────────────────
 void handleOtaPage()
 {
-    String html = R"rawliteral(<!DOCTYPE html><html lang="hu"><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Modbus-MQTT Bridge — OTA Firmware</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,sans-serif;background:#0d1117;color:#c9d1d9;padding:12px;font-size:15px}
-h1{color:#58a6ff;font-size:1.3em;margin:8px 0}
-h2{color:#f0883e;background:#161b22;padding:8px 12px;border-radius:6px;margin:16px 0 8px;font-size:1.05em}
-.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px;margin:6px 0}
-.row{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #21262d}
-.row:last-child{border:none}
-.key{color:#8b949e}.val{color:#c9d1d9;font-weight:600}
-.nav{display:flex;gap:8px;margin:8px 0}
-.nav a{background:#21262d;color:#58a6ff;padding:8px 16px;border-radius:6px;text-decoration:none;font-size:14px}
-.nav a:hover{background:#30363d}
-.nav a.active{background:#238636;color:white}
-.fm{margin-bottom:8px}
-label{display:block;font-weight:600;color:#7ee787;margin-bottom:2px;font-size:14px}
-input[type=file]{width:100%;padding:8px;border:1px solid #30363d;border-radius:4px;background:#0d1117;color:#c9d1d9;font-size:15px}
-button{background:#238636;color:white;border:none;padding:10px 20px;border-radius:6px;font-size:16px;cursor:pointer;margin:10px 0}
-button:hover{background:#2ea043}
-button:disabled{background:#484f58;cursor:not-allowed}
-.note{color:#8b949e;font-size:12px;margin:2px 0 8px}
-.warn-box{background:#161b22;border:1px solid #f85149;border-radius:6px;padding:12px;margin:8px 0}
-.warn-box b{color:#f85149}
-.foot{text-align:center;color:#484f58;font-size:11px;margin-top:16px;border-top:1px solid #21262d;padding-top:8px}
-#progress{display:none;margin:12px 0}
-#progressBar{width:100%;height:24px;background:#21262d;border-radius:4px;overflow:hidden}
-#progressFill{width:0%;height:100%;background:#238636;transition:width 0.3s}
-#progressText{text-align:center;color:#c9d1d9;margin:4px 0;font-size:14px}
-#status{margin:12px 0;padding:12px;border-radius:6px;display:none}
-.status-ok{background:#0d1117;border:1px solid #3fb950;color:#3fb950}
-.status-err{background:#0d1117;border:1px solid #f85149;color:#f85149}
-</style></head><body>
-<h1>&#128230; OTA Firmware Frissítés</h1>
-<div class="nav"><a href="/">Státusz</a><a href="/config">Beállítások</a><a href="/pins">Pinek</a><a href="/modules">Modulok</a><a class="active" href="/ota">OTA</a><a href="/admin">Admin</a><a href="/logout" style="float:right">🔒 Kilépés</a></div>
+    String authSfx = web.hasArg("auth") ? "?auth=" + web.arg("auth") : "";
 
-<div class="warn-box"><b>&#9888; Figyelem!</b> A firmware frissítés során az eszköz újraindul. Hibás firmware brickelheti az eszközt! Csak megbízható .bin fájlt tölts fel!</div>
+    String html;
+    html.reserve(3000);
+    html = pageStart(F("OTA Firmware"), CSS_OTA) + pageStyleEnd();
+    html += navHtml(PG_OTA, authSfx);
 
-<div class="card">
-<h2>&#128190; Firmware feltöltés</h2>
-<form id="otaForm" action="/otaupload" method="POST" enctype="multipart/form-data">
-<div class="fm"><label>Firmware .bin fájl</label><input type="file" name="firmware" accept=".bin" id="fwFile" onchange="onFileSelect()"></div>
-<p class="note">Maximum méret: 1.25 MB. Fájlformátum: ESP32-S3 .bin firmware | Jelenlegi: )rawliteral";
+    // Warning
+    html += F("<div class='warn-box'><b>&#9888; Figyelem!</b> A firmware frissítés során az eszköz újraindul. Hibás firmware brickelheti az eszközt! Csak megbízható .bin fájlt tölts fel!</div>");
 
+    // Upload form
+    html += F("<div class='card'>"
+              "<h2>&#128190; Firmware feltöltés</h2>"
+              "<form id='otaForm' action='/otaupload");
+    html += authSfx;
+    html += F("' method='POST' enctype='multipart/form-data'>"
+              "<div class='fm'><label>Firmware .bin fájl</label>"
+              "<input type='file' name='firmware' accept='.bin' id='fwFile' onchange='onFileSelect()'></div>"
+              "<p class='note'>Maximum méret: 1.25 MB. Fájlformátum: ESP32-S3 .bin firmware | Jelenlegi: ");
     html += String(FIRMWARE_VERSION);
+    html += F("</p>"
+              "<button type='submit' id='uploadBtn' disabled>&#128230; Feltöltés &amp; Frissítés</button>"
+              "</form></div>");
 
-    html += R"rawliteral(</p>
-<button type="submit" id="uploadBtn" disabled>&#128230; Feltöltés & Frissítés</button>
-</form>
-</div>
+    // Progress bar
+    html += F("<div id='progress'>"
+              "<h2>&#128259; Feltöltés folyamatban...</h2>"
+              "<div id='progressBar'><div id='progressFill'></div></div>"
+              "<div id='progressText'>0%</div>"
+              "</div>");
 
-<div id="progress">
-<h2>&#128259; Feltöltés folyamatban...</h2>
-<div id="progressBar"><div id="progressFill"></div></div>
-<div id="progressText">0%</div>
-</div>
+    // Status placeholder
+    html += F("<div id='status'></div>");
 
-<div id="status"></div>
-
-<div class="card">
-<h2>&#9881; Rendszer infó</h2>
-<div class="row"><span class="key">SDK verzió</span><span class="val">)rawliteral";
-
-    html += String(ESP.getSdkVersion()) + "</span></div>";
-    html += "<div class=\"row\"><span class=\"key\">Chip revision</span><span class=\"val\">" +
+    // System info
+    html += F("<div class='card'>"
+              "<h2>&#9881; Rendszer infó</h2>");
+    html += "<div class='row'><span class='key'>SDK verzió</span><span class='val'>" +
+            String(ESP.getSdkVersion()) + "</span></div>";
+    html += "<div class='row'><span class='key'>Chip revision</span><span class='val'>" +
             String(ESP.getChipRevision()) + "</span></div>";
-    html += "<div class=\"row\"><span class=\"key\">Flash méret</span><span class=\"val\">" +
+    html += "<div class='row'><span class='key'>Flash méret</span><span class='val'>" +
             String(ESP.getFlashChipSize() / 1024 / 1024) + " MB</span></div>";
-    html += "<div class=\"row\"><span class=\"key\">OTA max méret</span><span class=\"val\">1.25 MB</span></div>";
-    html += "</div>";
+    html += F("<div class='row'><span class='key'>OTA max méret</span><span class='val'>1.25 MB</span></div>");
+    html += F("</div>");
 
-    html += "<div class=\"foot\">Modbus-MQTT Bridge v2.0 — ESP32-S3-ETH (6DI+6R) — ESP32-S3</div>";
+    // URL OTA (optional)
+    html += F("<div class='card'>"
+              "<h2>&#127760; OTA URL-ről</h2>"
+              "<div class='url-ota'>"
+              "<div class='fm'><label>Firmware URL</label>"
+              "<input type='text' id='otaUrl' placeholder='https://example.com/firmware.bin'></div>"
+              "<button type='button' id='otaUrlBtn' onclick='startUrlOta()'>&#128259; Letöltés &amp; Frissítés</button>"
+              "</div></div>");
 
-    html += R"rawliteral(<script>
-function onFileSelect(){
-    var f=document.getElementById('fwFile').files[0];
-    document.getElementById('uploadBtn').disabled=!f;
-    if(f&&f.size>1310720){
-        alert('A fájl túllépi az 1.25 MB korlátot! ('+Math.round(f.size/1024)+' KB)');
-        document.getElementById('uploadBtn').disabled=true;
-    }
-}
-document.getElementById('otaForm').onsubmit=function(){
-    document.getElementById('progress').style.display='block';
-    document.getElementById('uploadBtn').disabled=true;
-    var xhr=new XMLHttpRequest();
-    xhr.open('POST','/otaupload',true);
-    xhr.upload.onprogress=function(e){
-        if(e.lengthComputable){
-            var pct=Math.round(e.loaded/e.total*100);
-            document.getElementById('progressFill').style.width=pct+'%';
-            document.getElementById('progressText').textContent=pct+'% ('+Math.round(e.loaded/1024)+' / '+Math.round(e.total/1024)+' KB)';
-        }
-    };
-    xhr.onload=function(){
-        document.getElementById('progress').style.display='none';
-        var s=document.getElementById('status');
-        if(xhr.status==200){
-            s.className='status-ok';
-            s.innerHTML='&#10004; Firmware sikeresen frissítve! Az eszköz újraindul 3 másodperc múlva...';
-            s.style.display='block';
-            setTimeout(function(){window.location='/'},8000);
-        }else{
-            s.className='status-err';
-            s.innerHTML='&#10008; Hiba: '+xhr.responseText;
-            s.style.display='block';
-            document.getElementById('uploadBtn').disabled=false;
-        }
-    };
-    xhr.onerror=function(){
-        document.getElementById('progress').style.display='none';
-        var s=document.getElementById('status');
-        s.className='status-err';
-        s.innerHTML='&#10008; Hálózati hiba a feltöltés során!';
-        s.style.display='block';
-        document.getElementById('uploadBtn').disabled=false;
-    };
-    xhr.send(new FormData(this));
-    return false;
-};
-</script></body></html>)rawliteral";
+    // JavaScript for upload + URL OTA
+    html += F("<script>"
+              "function onFileSelect(){"
+              "var f=document.getElementById('fwFile').files[0];"
+              "document.getElementById('uploadBtn').disabled=!f;"
+              "if(f&&f.size>1310720){"
+              "alert('A fájl túllépi az 1.25 MB korlátot! ('+Math.round(f.size/1024)+' KB)');"
+              "document.getElementById('uploadBtn').disabled=true;"
+              "}"
+              "}"
+              "document.getElementById('otaForm').onsubmit=function(){"
+              "document.getElementById('progress').style.display='block';"
+              "document.getElementById('uploadBtn').disabled=true;"
+              "var xhr=new XMLHttpRequest();"
+              "xhr.open('POST',this.action,true);"
+              "xhr.upload.onprogress=function(e){"
+              "if(e.lengthComputable){"
+              "var pct=Math.round(e.loaded/e.total*100);"
+              "document.getElementById('progressFill').style.width=pct+'%';"
+              "document.getElementById('progressText').textContent=pct+'% ('+Math.round(e.loaded/1024)+' / '+Math.round(e.total/1024)+' KB)';"
+              "}"
+              "};"
+              "xhr.onload=function(){"
+              "document.getElementById('progress').style.display='none';"
+              "var s=document.getElementById('status');"
+              "if(xhr.status==200){"
+              "s.className='status-ok';"
+              "s.innerHTML='&#10004; Firmware sikeresen frissítve! Az eszköz újraindul 3 másodperc múlva...';"
+              "s.style.display='block';"
+              "setTimeout(function(){window.location='/'+location.search},8000);"
+              "}else{"
+              "s.className='status-err';"
+              "s.innerHTML='&#10008; Hiba: '+xhr.responseText;"
+              "s.style.display='block';"
+              "document.getElementById('uploadBtn').disabled=false;"
+              "}"
+              "};"
+              "xhr.onerror=function(){"
+              "document.getElementById('progress').style.display='none';"
+              "var s=document.getElementById('status');"
+              "s.className='status-err';"
+              "s.innerHTML='&#10008; Hálózati hiba a feltöltés során!';"
+              "s.style.display='block';"
+              "document.getElementById('uploadBtn').disabled=false;"
+              "};"
+              "xhr.send(new FormData(this));"
+              "return false;"
+              "};"
+              "function startUrlOta(){"
+              "var url=document.getElementById('otaUrl').value.trim();"
+              "if(!url){alert('Adj meg egy URL-t!');return;}"
+              "var s=document.getElementById('status');"
+              "s.className='';"
+              "s.style.display='block';"
+              "s.innerHTML='&#128259; Firmware letöltése URL-ről...';"
+              "var xh=new XMLHttpRequest();"
+              "var as=location.search?('&'+location.search.substr(1)):'';"
+              "xh.open('GET','/otaurl?url='+encodeURIComponent(url)+as,true);"
+              "xh.onload=function(){"
+              "if(xh.status==200){"
+              "s.className='status-ok';"
+              "s.innerHTML='&#10004; Firmware sikeresen frissítve! Újraindulás...';"
+              "setTimeout(function(){window.location='/'+location.search},8000);"
+              "}else{"
+              "s.className='status-err';"
+              "s.innerHTML='&#10008; Hiba: '+xh.responseText;"
+              "}"
+              "};"
+              "xh.onerror=function(){"
+              "s.className='status-err';"
+              "s.innerHTML='&#10008; Hálózati hiba!';"
+              "};"
+              "xh.send();"
+              "}"
+              "</script>");
 
+    html += pageFoot();
     web.send(200, "text/html", html);
 }
 

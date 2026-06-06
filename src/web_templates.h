@@ -209,6 +209,32 @@ static const char CSS_LED[] PROGMEM = R"rawliteral(
 .led-section h3{color:#58a6ff;font-size:14px;margin:0 0 8px}
 )rawliteral";
 
+// ─── OTA Firmware page extra CSS ──────────────────────────────
+static const char CSS_OTA[] PROGMEM = R"rawliteral(
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px;margin:6px 0}
+.row{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #21262d}
+.row:last-child{border:none}
+.key{color:#8b949e}.val{color:#c9d1d9;font-weight:600}
+.fm{margin-bottom:8px}
+label{display:block;font-weight:600;color:#7ee787;margin-bottom:2px;font-size:14px}
+input[type=file]{width:100%;padding:8px;border:1px solid #30363d;border-radius:4px;background:#0d1117;color:#c9d1d9;font-size:15px}
+button{background:#238636;color:white;border:none;padding:10px 20px;border-radius:6px;font-size:16px;cursor:pointer;margin:10px 0}
+button:hover{background:#2ea043}
+button:disabled{background:#484f58;cursor:not-allowed}
+.warn-box{background:#161b22;border:1px solid #f85149;border-radius:6px;padding:12px;margin:8px 0}
+.warn-box b{color:#f85149}
+#progress{display:none;margin:12px 0}
+#progressBar{width:100%;height:24px;background:#21262d;border-radius:4px;overflow:hidden}
+#progressFill{width:0%;height:100%;background:#238636;transition:width 0.3s}
+#progressText{text-align:center;color:#c9d1d9;margin:4px 0;font-size:14px}
+#status{margin:12px 0;padding:12px;border-radius:6px;display:none}
+.status-ok{background:#0d1117;border:1px solid #3fb950;color:#3fb950}
+.status-err{background:#0d1117;border:1px solid #f85149;color:#f85149}
+.url-ota{margin:8px 0}
+.url-ota input[type=text]{width:100%;padding:8px;border:1px solid #30363d;border-radius:4px;background:#0d1117;color:#c9d1d9;font-size:14px}
+.url-ota input[type=text]:focus{outline:none;border-color:#58a6ff}
+)rawliteral";
+
 // ─── Admin page extra CSS ─────────────────────────────────────
 // Defined inline if needed; placeholder for future extraction
 
