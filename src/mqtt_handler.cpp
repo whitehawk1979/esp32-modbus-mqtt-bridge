@@ -669,6 +669,7 @@ void mqtt_publish_discovery(Slave_Module *mod)
         set_device_block(doc, mod, area);
 
         discovery_publish(discovery_topic("binary_sensor", uid_avail), doc);
+        esp_task_wdt_reset();
     }
 
     // Slave Address Sensor
@@ -687,6 +688,7 @@ void mqtt_publish_discovery(Slave_Module *mod)
         set_device_block(doc, mod, area);
 
         discovery_publish(discovery_topic("sensor", uid_addr), doc);
+        esp_task_wdt_reset();
     }
 
     // Publish slave address value

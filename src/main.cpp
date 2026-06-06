@@ -1024,16 +1024,18 @@ void loop()
         }
     }
 
-    // ── Register polling ──────────────────────────────────
+    // ── Register polling (ONE register per loop iteration to prevent WDT timeout) ──
+    static uint8_t reg_poll_idx = 0;
     if (register_count > 0 && scanning_done && mqtt_is_connected() && !bus_busy && !modbus_is_paused())
     {
-        for (uint8_t i = 0; i < register_count; i++)
+        // Find next register to poll (round-robin, one per loop)
+        for (uint8_t attempts = 0; attempts < register_count; attempts++)
         {
-            RegisterConfig &reg = registers[i];
+            RegisterConfig &reg = registers[reg_poll_idx];
+            reg_poll_idx = (reg_poll_idx + 1) % register_count;
+
             if (!reg.enabled)
                 continue;
-
-            // Respect poll interval per register
             if (millis() - reg.last_read_ms < cfg.mb_poll_ms)
                 continue;
 
@@ -1058,10 +1060,16 @@ void loop()
                     mqtt_publish_register_value(&reg);
                 }
             }
+            else
+            {
+                // Modbus read failed — record timestamp to respect poll interval
+                reg.last_read_ms = millis();
+            }
 
             // Feed task WDT after each register (Modbus timeout can block 500ms+)
             esp_task_wdt_reset();
             yield();
+            break; // Only ONE register per loop iteration
         }
     }
 
