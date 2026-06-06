@@ -631,6 +631,7 @@ uint32_t tcp_get_err_count();
 // eth_handler.cpp
 void eth_init();
 void eth_loop();
+void w5500_reinit();
 bool eth_is_connected();
 bool eth_is_started();
 void eth_set_connected(bool v);

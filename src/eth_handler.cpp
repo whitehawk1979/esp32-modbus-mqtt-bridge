@@ -342,6 +342,56 @@ void eth_loop()
                 lan_connected = false;
                 LOG_ILN("[LAN] ✗ W5500 link DOWN — falling back to WiFi");
             }
+
+            // ── W5500 auto-recovery: reinit chip if hardware lost or link down >60s ──
+            {
+                static bool w5500_lost = false;
+                static uint32_t link_down_since = 0;
+                int hw = Ethernet.hardwareStatus();
+
+                if (hw != EthernetW5500)
+                {
+                    // Chip not responding — schedule full reinit
+                    if (!w5500_lost)
+                    {
+                        LOG_ELN("[LAN] ⚠ W5500 hardware lost! Scheduling full reinit...");
+                        w5500_lost = true;
+                        link_down_since = millis();
+                    }
+                }
+                else if (!link)
+                {
+                    // Link down — track duration
+                    if (link_down_since == 0)
+                        link_down_since = millis();
+                    // If link down > 60s, schedule reinit
+                    if (millis() - link_down_since > 60000 && !w5500_lost)
+                    {
+                        LOG_I("[LAN] W5500 link down for %lus — scheduling reinit\n",
+                              (unsigned long)((millis() - link_down_since) / 1000));
+                        w5500_lost = true;
+                    }
+                }
+                else
+                {
+                    // Link ON, hw OK — clear recovery state
+                    w5500_lost = false;
+                    link_down_since = 0;
+                }
+
+                if (w5500_lost)
+                {
+                    static uint32_t last_reinit = 0;
+                    if (millis() - last_reinit > 30000) // reinit every 30s
+                    {
+                        last_reinit = millis();
+                        LOG_ILN("[LAN] Initiating W5500 full reinit...");
+                        w5500_reinit();
+                        w5500_lost = false; // allow re-detection on next failure
+                        link_down_since = 0;
+                    }
+                }
+            }
 #endif
         }
         // LAN8720 and IP101 events handled by onEthEvent callback
@@ -395,6 +445,101 @@ void eth_loop()
         }
 #endif
     }
+}
+
+// ── W5500 Full Reinit (called from eth_loop when chip lost or link down >60s) ──
+// Launches a FreeRTOS task to avoid blocking the main loop.
+void w5500_reinit()
+{
+#ifdef HAS_W5500
+    static volatile bool reinit_task_running = false;
+    if (reinit_task_running)
+        return;
+
+    reinit_task_running = true;
+    lan_connected = false;
+
+    xTaskCreate(
+            [](void *param) {
+                LOG_ILN("[LAN-REINIT] Task started — full W5500 reinit");
+
+                // Step 1: RST pulse
+                if (cfg.pin_eth_rst >= 0)
+                {
+                    LOG_I("[LAN-REINIT] RST pin=%d → LOW\n", cfg.pin_eth_rst);
+                    pinMode(cfg.pin_eth_rst, OUTPUT);
+                    digitalWrite(cfg.pin_eth_rst, LOW);
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                    digitalWrite(cfg.pin_eth_rst, HIGH);
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    LOG_ILN("[LAN-REINIT] RST pulse done → HIGH");
+                }
+
+                // Step 2: SPI reinit
+                LOG_ILN("[LAN-REINIT] Re-initializing SPI + W5500...");
+                SPI.begin(cfg.pin_eth_sclk, cfg.pin_eth_miso, cfg.pin_eth_mosi, cfg.pin_eth_cs);
+                Ethernet.init(cfg.pin_eth_cs);
+                vTaskDelay(pdMS_TO_TICKS(100));
+
+                // Step 3: Check hardware
+                int hw = Ethernet.hardwareStatus();
+                if (hw != EthernetW5500)
+                {
+                    LOG_E("[LAN-REINIT] W5500 not detected after reinit (hw=%d). Aborting.\n", hw);
+                    reinit_task_running = false;
+                    vTaskDelete(NULL);
+                }
+                LOG_ILN("[LAN-REINIT] W5500 hardware OK");
+
+                // Step 4: DHCP or Static IP
+                bool ok = false;
+                if (cfg.lan_dhcp)
+                {
+                    LOG_ILN("[LAN-REINIT] Starting DHCP (5s timeout)...");
+                    int result = Ethernet.begin(eth_mac, 5000, 2000);
+                    if (result == 0)
+                    {
+                        LOG_ELN("[LAN-REINIT] DHCP FAILED — no IP acquired");
+                    }
+                    else
+                    {
+                        LOG_I("[LAN-REINIT] ✓ DHCP OK! IP: %s\n", Ethernet.localIP().toString().c_str());
+                        ok = true;
+                    }
+                }
+                else
+                {
+                    IPAddress ip, gw, mask, dns;
+                    ip.fromString(cfg.lan_ip);
+                    gw.fromString(cfg.lan_gw);
+                    mask.fromString(cfg.lan_mask);
+                    dns.fromString(cfg.lan_dns);
+                    Ethernet.begin(eth_mac, ip, dns, gw, mask);
+                    ok = true;
+                    LOG_I("[LAN-REINIT] ✓ Static IP: %s\n", Ethernet.localIP().toString().c_str());
+                }
+
+                if (ok)
+                {
+                    lan_connected = true;
+                    LOG_I("[LAN-REINIT] ✓ W5500 recovered! IP: %s link=%s\n",
+                          Ethernet.localIP().toString().c_str(),
+                          Ethernet.linkStatus() == LinkON ? "ON" : "OFF");
+                }
+                else
+                {
+                    LOG_ELN("[LAN-REINIT] ✗ W5500 reinit failed — WiFi fallback active");
+                }
+
+                reinit_task_running = false;
+                vTaskDelete(NULL);
+            },
+            "w5500_reinit",
+            4096,
+            NULL,
+            1,
+            NULL);
+#endif
 }
 
 bool eth_is_connected()
