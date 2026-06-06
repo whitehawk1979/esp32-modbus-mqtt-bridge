@@ -1333,7 +1333,7 @@ function toggleDI(addr,di,curState){
         if (m.online)
         {
             // Relays — clickable toggle buttons
-            html += "<div class=\"elabel\">Relék: <span class=\"note\">(kattintás = kapcsolás)</span></div><div>";
+            html += "<div class=\"mod-section\"><div class=\"mod-section-title\">⚡ Relék <span class=\"note\">(kattintás = kapcsolás)</span></div><div class=\"entity-row\">";
             for (uint8_t r = 0; r < HA_V2_RELAY_COUNT; r++)
             {
                 String rcls = m.relays[r].state ? "rbtn on" : "rbtn off";
@@ -1342,12 +1342,13 @@ function toggleDI(addr,di,curState){
                         "\" onclick=\"toggleRelay(" + String(m.slave_addr) + "," + String(r) + "," +
                         String(m.relays[r].state ? 1 : 0) + ")\">" + rtxt + "</span>";
             }
-            html += "</div>";
+            html += "</div></div>";
 
             // Digital Inputs
-            html += "<div class=\"elabel\">Bemenetek:</div><div>";
+            html += "<div class=\"mod-section\"><div class=\"mod-section-title\">🔌 Bemenetek</div>";
             for (uint8_t d = 0; d < HA_V2_DI_COUNT; d++)
             {
+                html += "<div class=\"entity-row\">";
                 if (m.is_virtual)
                 {
                     // Virtual module: clickable toggle button
@@ -1371,23 +1372,24 @@ function toggleDI(addr,di,curState){
                 }
                 // ── DI→Relay mapping selector ──
                 html += "<select id=\"dr" + String(m.slave_addr) + "_" + String(d) +
-                         "\" onchange=\"setDiRelay(" + String(m.slave_addr) + "," + String(d) + ",this.value)\" style=\"font-size:11px;margin-left:4px;\">";
+                         "\" onchange=\"setDiRelay(" + String(m.slave_addr) + "," + String(d) + ",this.value)\" style=\"font-size:12px;margin-left:8px;\">";
                 html += "<option value=\"255\"" + String(m.di_relay_map[d] == 255 ? " selected" : "") + ">—</option>";
                 for (uint8_t r = 0; r < m.model.RELAY_COUNT; r++)
                     html += "<option value=\"" + String(r) + "\"" +
                              String(m.di_relay_map[d] == r ? " selected" : "") +
                              ">R" + String(r + 1) + "</option>";
                 html += "</select>";
+                html += "</div>"; // entity-row
             }
             html += "</div>";
 
             // Click sensors
-            html += "<div class=\"elabel\">Kattintás:</div><div>";
+            html += "<div class=\"mod-section\"><div class=\"mod-section-title\">👆 Kattintás</div><div class=\"entity-row\">";
             for (uint8_t d = 0; d < HA_V2_DI_COUNT; d++)
             {
                 html += "<span class=\"badge sensor\">DI" + String(d + 1) + " ⚡</span>";
             }
-            html += "</div>";
+            html += "</div></div>";
         }
 
         html += "<div class=\"mrow\">";
@@ -1405,7 +1407,7 @@ function toggleDI(addr,di,curState){
         // Per-relay names (only for online modules)
         if (m.online)
         {
-            html += "<div class=\"elabel\">Relé nevek:</div><div class=\"mrow-wrap\">";
+            html += "<div class=\"mod-section\"><div class=\"mod-section-title\">🏷️ Relé nevek</div><div class=\"mrow-wrap\">";
             for (uint8_t r = 0; r < HA_V2_RELAY_COUNT; r++)
             {
                 String rn = config_get_relay_name(m.slave_addr, r);
@@ -1413,9 +1415,9 @@ function toggleDI(addr,di,curState){
                         String(m.slave_addr) + "_" + String(r) + "\" value=\"" + htmlEscape(rn) + "\" placeholder=\"Relé " +
                         String(r + 1) + "\"></div>";
             }
-            html += "</div>";
+            html += "</div></div>";
 
-            html += "<div class=\"elabel\">DI nevek:</div><div class=\"mrow-wrap\">";
+            html += "<div class=\"mod-section\"><div class=\"mod-section-title\">🏷️ DI nevek</div><div class=\"mrow-wrap\">";
             for (uint8_t d = 0; d < HA_V2_DI_COUNT; d++)
             {
                 String dn = config_get_di_name(m.slave_addr, d);
@@ -1423,7 +1425,7 @@ function toggleDI(addr,di,curState){
                         String(m.slave_addr) + "_" + String(d) + "\" value=\"" + htmlEscape(dn) + "\" placeholder=\"DI " +
                         String(d + 1) + "\"></div>";
             }
-            html += "</div>";
+            html += "</div></div>";
         }
 
         html += "</div>";

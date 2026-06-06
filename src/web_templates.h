@@ -117,6 +117,23 @@ static const char CSS_MODULES[] PROGMEM = R"rawliteral(
 .badge.sensor{background:#1f6feb4d;color:#58a6ff}
 .elabel{color:#8b949e;font-size:12px;margin:4px 0 2px}
 .mrow-wrap{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0}
+.mod-section{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:10px;margin:8px 0}
+.mod-section-title{color:#f0883e;font-size:13px;font-weight:600;margin:0 0 6px;display:flex;align-items:center;gap:4px}
+.entity-row{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0;align-items:center}
+@media(max-width:768px){
+  .mod-card{padding:10px 8px}
+  .mrow{flex-direction:column;gap:4px}
+  .mrow .fm{width:100%}
+  .fm-sm{flex:0 0 100%!important;min-width:0!important}
+  .mrow-wrap{flex-direction:column;gap:4px}
+  .rbtn{padding:8px 16px!important;font-size:15px!important;margin:3px!important;min-width:60px;text-align:center}
+  .badge{padding:4px 10px;font-size:13px;margin:2px}
+  .elabel{font-size:13px;margin:8px 0 4px}
+  select{font-size:14px!important;padding:6px 8px!important;min-height:36px}
+  input[type=text]{font-size:16px!important;padding:8px!important;min-height:38px}
+  .room-manage{padding:8px}
+  .room-tag{font-size:14px;padding:4px 12px}
+}
 )rawliteral";
 
 // ─── Register Config page extra CSS ──────────────────────────────
