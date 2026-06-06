@@ -1200,7 +1200,7 @@ static void handleModules()
 .fm-sm label{display:block;color:#8b949e;font-size:11px;margin-bottom:2px}
 .fm-sm input{width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:4px 6px;border-radius:4px;font-size:13px}
 .room-other{margin-top:4px}
-.room-manage{margin:24px 0 0;padding:12px;background:#161b22;border:1px solid #30363d;border-radius:8px;border-top:3px solid #f0883e}
+.room-manage{margin:24px 0 0;padding:12px;background:#161b22;border:1px solid #30363d;border-radius:8px;border-top:3px solid #f0883e;clear:both;width:100%}
 .room-manage h3{color:#f0883e;font-size:14px;margin:0 0 8px}
 .room-tags{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
 .room-tag{display:inline-flex;align-items:center;gap:4px;background:#21262d;padding:4px 12px;border-radius:20px;font-size:13px;color:#c9d1d9;white-space:nowrap}
