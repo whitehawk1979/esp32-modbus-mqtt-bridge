@@ -16,6 +16,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <algorithm>
+#include <esp_task_wdt.h>
 #include "web_templates.h"
 #include "web_adapter.h"
 #ifdef USE_W5500
@@ -409,6 +410,10 @@ static String profileName(uint8_t p)
         return "KC868-HA V2";
     case MB_PROFILE_GENERIC:
         return "Generic";
+    case MB_PROFILE_NIBE:
+        return "NIBE S1156-18";
+    case MB_PROFILE_SABIANA:
+        return "Sabiana";
     case MB_PROFILE_CUSTOM:
         return "Egyedi";
     default:
@@ -892,6 +897,10 @@ static void handleConfig()
             ">KC868-HA V2</option>";
     html += "<option value=\"2\"" + String(cfg.mb_profile == MB_PROFILE_GENERIC ? " selected" : "") +
             ">Generic (konfigurálható)</option>";
+    html += "<option value=\"3\"" + String(cfg.mb_profile == MB_PROFILE_NIBE ? " selected" : "") +
+            ">NIBE S1156-18</option>";
+    html += "<option value=\"4\"" + String(cfg.mb_profile == MB_PROFILE_SABIANA ? " selected" : "") +
+            ">Sabiana</option>";
     html += "<option value=\"0\"" + String(cfg.mb_profile == MB_PROFILE_CUSTOM ? " selected" : "") + ">Egyedi</option>";
     html += "</select></div>";
 
@@ -4763,4 +4772,6 @@ void web_server_loop()
 {
     web.handleClient();
     eth_web_loop(); // W5500 Ethernet web server
+    // Feed task WDT after web server processing (large pages can take several seconds)
+    esp_task_wdt_reset();
 }

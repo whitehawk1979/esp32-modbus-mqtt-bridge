@@ -98,6 +98,8 @@
 #define MB_PROFILE_CUSTOM 0
 #define MB_PROFILE_KC868_HA 1 // KinCony KC868-HA V2 (6DI+6R)
 #define MB_PROFILE_GENERIC 2  // Generic holding registers (configurable)
+#define MB_PROFILE_NIBE    3 // NIBE S1156-18 heat pump (Modbus41, input regs)
+#define MB_PROFILE_SABIANA 4 // Sabiana fan-coil controllers
 
 // ─── Modbus Register Map (KC868-HA V2) ────────────────────────
 #define REG_MODEL_ID 0x0064
@@ -128,7 +130,7 @@
 #define MQTT_RECONNECT_MS 5000
 
 // ─── Firmware Version ────────────────────────────────────────
-#define FIRMWARE_VERSION "2.11.0" // Scan result API, register scan, FC05 coil write, storage nav fix, OTA_MAX_SIZE 3MB
+#define FIRMWARE_VERSION "2.12.1" // NIBE S1156-18 PROGMEM profile, KinCony profile header, auto-load
 
 // ─── TCP Modbus Bridge ─────────────────────────────────────────
 #define TCP_PORT 502

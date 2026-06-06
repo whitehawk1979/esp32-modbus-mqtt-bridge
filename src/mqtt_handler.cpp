@@ -12,6 +12,7 @@
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
+#include <esp_task_wdt.h>
 #include "modbus_mqtt_ha_bridge.h"
 
 #ifdef USE_W5500
@@ -246,6 +247,9 @@ void mqtt_init()
         {
             if (registers[i].enabled)
                 mqtt_publish_register_discovery(&registers[i]);
+            // Feed task WDT during bulk discovery publish (25+ registers)
+            esp_task_wdt_reset();
+            yield();
         }
 #ifdef USE_WS2812
         // ── LED: discovery, subscribe, state ──
@@ -596,6 +600,9 @@ void mqtt_publish_discovery(Slave_Module *mod)
         set_device_block(doc, mod, area);
 
         discovery_publish(discovery_topic("switch", uid), doc);
+
+        // Feed task WDT during bulk discovery publish
+        esp_task_wdt_reset();
     }
 
     // DI Binary Sensors (state ON/OFF)
@@ -619,6 +626,7 @@ void mqtt_publish_discovery(Slave_Module *mod)
         set_device_block(doc, mod, area);
 
         discovery_publish(discovery_topic("binary_sensor", uid), doc);
+        esp_task_wdt_reset();
     }
 
     // DI Click Event Sensors (for automation triggers)
@@ -643,6 +651,7 @@ void mqtt_publish_discovery(Slave_Module *mod)
         set_device_block(doc, mod, area);
 
         discovery_publish(discovery_topic("sensor", click_uid), doc);
+        esp_task_wdt_reset();
     }
 
     // Module Status Binary Sensor

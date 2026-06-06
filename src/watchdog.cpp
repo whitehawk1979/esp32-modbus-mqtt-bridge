@@ -11,6 +11,7 @@
 
 #include "modbus_mqtt_ha_bridge.h"
 #include <Preferences.h>
+#include <esp_task_wdt.h>
 
 // ─── Thresholds ─────────────────────────────────────────────────
 #define WDT_LOOP_TIMEOUT_MS 30000 // Reboot if loop stuck 30s
@@ -31,6 +32,11 @@ static bool wdt_initialized = false;
 
 void wdt_init()
 {
+    // Note: ESP-IDF task WDT is kept enabled (5s default timeout for arduino_loop_task).
+    // We feed it with esp_task_wdt_reset() in long-running sections (MQTT discovery,
+    // register polling, module discovery) to prevent WDT resets.
+    // Our software WDT (30s loop timeout in wdt_check()) still monitors overall liveness.
+
     Preferences nv;
     nv.begin(NV_NAMESPACE, true);
     wdt_reboots = nv.getUInt(NV_KEY_WDT_REBOOTS, 0);
@@ -46,6 +52,8 @@ void wdt_init()
 void wdt_loop_tick_reset()
 {
     wdt_loop_tick = millis();
+    // Also feed the ESP-IDF task WDT (5s default for arduino_loop_task)
+    esp_task_wdt_reset();
 }
 
 void wdt_notify_publish()

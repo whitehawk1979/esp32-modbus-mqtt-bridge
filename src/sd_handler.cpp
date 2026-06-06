@@ -178,26 +178,14 @@ static bool sd_init_spi(int8_t cs_pin)
     delay(50);
     w5500_cs_high();
 
-    // Try SD.begin at multiple speeds (Waveshare default ~4MHz, fallback to slower)
-    // Per Waveshare: SD.begin(4) with default SPI speed
-    LOG_I("[SD] SD.begin(CS=%d) — attempt 1 (default speed)...\n", cs_pin);
+    // Try SD.begin once — 3-retry wastes boot time when no card is present
+    // (R7/R19 not fitted on V1.0 boards, SD will always fail)
+    LOG_I("[SD] SD.begin(CS=%d, SPI 4MHz)...\n", cs_pin);
     if (!SD.begin(cs_pin))
     {
-        LOG_E("[SD] SD.begin() default speed FAILED — trying 400kHz...\n");
-        delay(100);
-        w5500_cs_high();
-        if (!SD.begin(cs_pin, SPI, 400000))
-        {
-            LOG_E("[SD] SD.begin() 400kHz FAILED — trying 20kHz...\n");
-            delay(100);
-            w5500_cs_high();
-            if (!SD.begin(cs_pin, SPI, 20000))
-            {
-                LOG_E("[SD] SD.begin() failed at all speeds\n");
-                SPI.end();
-                return false;
-            }
-        }
+        LOG_E("[SD] SD.begin() failed — no card or hardware issue\n");
+        SPI.end();
+        return false;
     }
 
     sd_using_sdio = false;

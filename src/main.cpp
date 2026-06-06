@@ -12,7 +12,10 @@
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
+#include <esp_task_wdt.h>
 #include "modbus_mqtt_ha_bridge.h"
+#include "nibe_profile.h"
+#include "kincony_profile.h"
 
 // ─── Global State (heap-allocated for unlimited modules) ───────
 Slave_Module *modules = nullptr;
@@ -731,6 +734,29 @@ void setup()
     config_load();
     config_load_registers();
 
+    // ── Auto-load device profile if no registers configured ──
+    if (register_count == 0)
+    {
+        switch (cfg.mb_profile)
+        {
+        case MB_PROFILE_NIBE:
+            nibe_load_profile(registers, &register_count);
+            config_save_registers();
+            LOG_I("[PROFILE] Auto-loaded NIBE S1156-18 profile: %u registers\n", register_count);
+            break;
+        // MB_PROFILE_KC868_HA uses DI/Relay polling, not registers
+        // MB_PROFILE_GENERIC: user configures manually
+        // MB_PROFILE_SABIANA: future — JSON profile from /profiles/
+        default:
+            LOG_I("[PROFILE] No auto-profile for mode %u\n", cfg.mb_profile);
+            break;
+        }
+    }
+    else
+    {
+        LOG_I("[PROFILE] %u registers already configured — skipping auto-load\n", register_count);
+    }
+
     // ── Watchdog init (before anything else) ──
     wdt_init();
 
@@ -970,6 +996,9 @@ void loop()
                 mqtt_publish_discovery(&modules[i]);
                 mqtt_subscribe_commands(&modules[i]);
                 modules[i].discovered = true;
+                // Feed task WDT after each module discovery (prevents WDT timeout)
+                esp_task_wdt_reset();
+                yield();
             }
         }
     }
@@ -1029,6 +1058,10 @@ void loop()
                     mqtt_publish_register_value(&reg);
                 }
             }
+
+            // Feed task WDT after each register (Modbus timeout can block 500ms+)
+            esp_task_wdt_reset();
+            yield();
         }
     }
 
