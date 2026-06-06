@@ -580,6 +580,7 @@ bool storage_init();
 bool storage_list_dir(const char *path, String &json_output);
 bool storage_read_file(const char *path, String &content);
 bool storage_write_file(const char *path, const char *content, size_t len);
+bool storage_restore_pins();
 bool storage_delete_file(const char *path);
 bool storage_exists(const char *path);
 uint64_t storage_total_bytes();

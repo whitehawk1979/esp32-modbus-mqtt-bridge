@@ -229,4 +229,63 @@ uint64_t storage_used_bytes()
     return LittleFS.usedBytes();
 }
 
+// ─── Restore pins from /active/pins.json to cfg struct ─────────
+// Called after storage_init() and config_load() to override defaults.
+// NOTE: We do NOT write to NVS here — that's done by /savepins handler.
+// This only updates the live cfg struct so the current boot uses
+// the persisted values. NVS was already loaded by config_load().
+bool storage_restore_pins()
+{
+    if (!storage_mounted)
+        return false;
+
+    String content;
+    if (!storage_read_file("/active/pins.json", content))
+    {
+        LOG_D("[STORAGE] No /active/pins.json found — using NVS defaults\n");
+        return false;
+    }
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, content);
+    if (err)
+    {
+        LOG_E("[STORAGE] Failed to parse /active/pins.json: %s\n", err.c_str());
+        return false;
+    }
+
+    // Map JSON keys to cfg fields — only update live config, not NVS
+    // (NVS was already loaded by config_load(); /savepins handles NVS writes)
+    struct PinMapping { const char *json_key; int8_t *cfg_field; };
+    static const PinMapping pins[] = {
+        {"pin_rs485_rx",   &cfg.pin_rs485_rx},
+        {"pin_rs485_tx",   &cfg.pin_rs485_tx},
+        {"pin_rs485_de",   &cfg.pin_rs485_de},
+        {"pin_status_led", &cfg.pin_status_led},
+        {"pin_config_btn", &cfg.pin_config_btn},
+        {"pin_eth_mosi",   &cfg.pin_eth_mosi},
+        {"pin_eth_miso",   &cfg.pin_eth_miso},
+        {"pin_eth_sclk",   &cfg.pin_eth_sclk},
+        {"pin_eth_cs",     &cfg.pin_eth_cs},
+        {"pin_eth_int",    &cfg.pin_eth_int},
+        {"pin_eth_rst",    &cfg.pin_eth_rst},
+        {"pin_sd_cs",      &cfg.pin_sd_cs},
+    };
+
+    int restored = 0;
+    for (const auto &p : pins)
+    {
+        if (!doc[p.json_key].isNull())
+        {
+            int8_t val = (int8_t)doc[p.json_key].as<int>();
+            *(p.cfg_field) = val;
+            LOG_I("[STORAGE] Pin %s = %d (restored from pins.json)\n", p.json_key, val);
+            restored++;
+        }
+    }
+
+    LOG_I("[STORAGE] Restored %d pins from /active/pins.json\n", restored);
+    return restored > 0;
+}
+
 #endif // USE_STORAGE

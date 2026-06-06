@@ -1539,6 +1539,30 @@ static void handleSavePins()
     nv.end();
     LOG_ILN("[WEB] Pin config saved");
 
+    // Also persist pins to /active/pins.json for NVS recovery after flash
+#ifdef USE_STORAGE
+    {
+        JsonDocument doc;
+        // Read from POST params (more current than cfg struct before reboot)
+        doc["pin_rs485_rx"]   = WS->hasArg("prx")    ? WS->arg("prx").toInt()    : cfg.pin_rs485_rx;
+        doc["pin_rs485_tx"]   = WS->hasArg("ptx")    ? WS->arg("ptx").toInt()    : cfg.pin_rs485_tx;
+        doc["pin_rs485_de"]   = WS->hasArg("pde")    ? WS->arg("pde").toInt()    : cfg.pin_rs485_de;
+        doc["pin_status_led"] = WS->hasArg("pled")   ? WS->arg("pled").toInt()   : cfg.pin_status_led;
+        doc["pin_config_btn"] = WS->hasArg("pbtn")   ? WS->arg("pbtn").toInt()   : cfg.pin_config_btn;
+        doc["pin_eth_mosi"]   = WS->hasArg("pemosi") ? WS->arg("pemosi").toInt() : cfg.pin_eth_mosi;
+        doc["pin_eth_miso"]   = WS->hasArg("pemiso") ? WS->arg("pemiso").toInt() : cfg.pin_eth_miso;
+        doc["pin_eth_sclk"]   = WS->hasArg("pesclk") ? WS->arg("pesclk").toInt() : cfg.pin_eth_sclk;
+        doc["pin_eth_cs"]     = WS->hasArg("pecs")   ? WS->arg("pecs").toInt()    : cfg.pin_eth_cs;
+        doc["pin_eth_int"]    = WS->hasArg("peint")  ? WS->arg("peint").toInt()   : cfg.pin_eth_int;
+        doc["pin_eth_rst"]    = WS->hasArg("perst")  ? WS->arg("perst").toInt()   : cfg.pin_eth_rst;
+        doc["pin_sd_cs"]      = WS->hasArg("psdcs")  ? WS->arg("psdcs").toInt()   : cfg.pin_sd_cs;
+        String json;
+        serializeJson(doc, json);
+        storage_write_file("/active/pins.json", json.c_str(), json.length());
+        LOG_ILN("[WEB] Pin config also saved to /active/pins.json");
+    }
+#endif
+
     // Update config CRC after NVRAM write
     config_write_crc();
 

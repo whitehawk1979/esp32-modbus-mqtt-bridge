@@ -837,7 +837,11 @@ static void do_staged_init()
         // ── LittleFS Flash Storage init ──
         LOG_ILN("[INIT] Flash Storage (LittleFS)...");
         if (storage_init())
+        {
             LOG_ILN("[INIT] Storage OK");
+            // Restore pins from /active/pins.json (overrides NVS defaults)
+            storage_restore_pins();
+        }
         else
             LOG_ELN("[INIT] Storage FAILED");
 #endif

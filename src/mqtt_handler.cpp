@@ -240,6 +240,13 @@ void mqtt_init()
             mqtt_pub("homeassistant/status", "online", true);
         // Publish bridge system device discovery
         mqtt_publish_bridge_discovery();
+        // Re-publish register discovery for all configured registers
+        // (HA may have restarted and needs fresh config topics)
+        for (uint8_t i = 0; i < register_count; i++)
+        {
+            if (registers[i].enabled)
+                mqtt_publish_register_discovery(&registers[i]);
+        }
 #ifdef USE_WS2812
         // ── LED: discovery, subscribe, state ──
         led_setup_discovery();
@@ -311,6 +318,12 @@ void mqtt_loop()
                     mqtt_pub("homeassistant/status", "online", true);
                 // Publish bridge system device discovery
                 mqtt_publish_bridge_discovery();
+                // Re-publish register discovery for all configured registers
+                for (uint8_t i = 0; i < register_count; i++)
+                {
+                    if (registers[i].enabled)
+                        mqtt_publish_register_discovery(&registers[i]);
+                }
 #ifdef USE_WS2812
                 // ── LED: discovery, subscribe, state ──
                 led_setup_discovery();
