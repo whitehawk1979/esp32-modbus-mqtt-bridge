@@ -853,7 +853,7 @@ static void do_staged_init()
         if (cfg.sd_enabled)
         {
             LOG_ILN("[INIT] SD card...");
-            if (sd_init(cfg.pin_sd_cs))
+            if (sd_init(cfg.pin_sd_cs, "auto"))
                 LOG_ILN("[INIT] SD OK");
             else
                 LOG_ELN("[INIT] SD FAILED — card present?");
