@@ -517,7 +517,7 @@ static void handleStatus()
     if (!web_auth_ok())
         return;
     String html;
-    html.reserve(6000); // Pre-allocate to reduce heap fragmentation
+    html.reserve(16384); // Pre-allocate to reduce heap fragmentation
     html = pageStart(F("Modbus-MQTT Bridge — Státusz"), CSS_STATUS) + pageStyleEnd();
 
     html += "<h1>&#9889; " + htmlEscape(cfg.hostname) + "</h1>";
@@ -762,7 +762,7 @@ static void handleConfig()
         return;
     // Build form with current values pre-filled
     String html;
-    html.reserve(8000);
+    html.reserve(24576);
     html = pageStart(F("Modbus-MQTT Bridge — Beállítások"), CSS_FORMS) + pageStyleEnd();
 
     html += F("<h1>&#9889; Beállítások</h1>");
@@ -1106,7 +1106,7 @@ static void handlePins()
     if (!web_auth_ok())
         return;
     String html;
-    html.reserve(6000);
+    html.reserve(16384);
     html = pageStart(F("Modbus-MQTT Bridge — Pinek"), CSS_FORMS) + FPSTR(CSS_PINS) + pageStyleEnd();
 
     html += F("<h1>&#128295; GPIO Pinek</h1>");
@@ -1193,7 +1193,7 @@ static void handleModules()
     if (!web_auth_ok())
         return;
     String html;
-    html.reserve(8000); // Largest page, many card loops
+    html.reserve(24576); // Largest page, many card loops
     // Standard structure: pageStart + pageStyleEnd (like all other pages)
     html = pageStart(F("Modbus-MQTT Bridge — Modulok"), CSS_MODULES) + FPSTR(CSS_FORMS) + pageStyleEnd();
 
@@ -2389,7 +2389,7 @@ static void handleSdCard()
     String authSuf = WS->hasArg("auth") ? ("?auth=" + WS->arg("auth")) : "";
 
     String html;
-    html.reserve(8000);
+    html.reserve(24576);
     html = pageStart(F("Modbus-MQTT Bridge — SD Kártya"), CSS_SD) + pageStyleEnd();
     html += F("<h1>&#128190; SD Kártya</h1>");
     html += navHtml(PG_SD, authSuf);
@@ -3473,7 +3473,7 @@ static void handleScan()
     String authQ = WS->hasArg("auth") ? ("?auth=" + WS->arg("auth")) : "";
 
     String html;
-    html.reserve(8000);
+    html.reserve(24576);
     html = pageStart(F("Modbus-MQTT Bridge — Scan"), CSS_STATUS) + pageStyleEnd();
     html += F("<h1>&#128269; Modbus Scan</h1>");
     html += navHtml(PG_SCAN, authQ);
@@ -3598,7 +3598,7 @@ static void handleStorage()
     if (curPath.isEmpty()) curPath = "/";
 
     String html;
-    html.reserve(6000);
+    html.reserve(16384);
     html = pageStart(F("Modbus-MQTT Bridge — Flash Storage"), CSS_STATUS) + pageStyleEnd();
     html += F("<h1>&#128193; Flash Storage</h1>");
     html += navHtml(PG_STORAGE, WS->hasArg("auth") ? ("?auth=" + WS->arg("auth")) : "");
@@ -4091,7 +4091,7 @@ static void handleAdmin()
         return;
 
     String html;
-    html.reserve(3000);
+    html.reserve(8192);
     html = pageStart(F("Modbus-MQTT Bridge — Admin"), CSS_FORMS) + pageStyleEnd();
 
     html += F("<h1>&#128272; Admin</h1>");
@@ -4259,7 +4259,7 @@ static void handleRegisters()
     if (!web_auth_ok())
         return;
     String html;
-    html.reserve(8000);
+    html.reserve(24576);
     String authSfx = WS->hasArg("auth") ? ("?auth=" + WS->arg("auth")) : String();
 
     html = pageStart(F("Modbus-MQTT Bridge — Regiszterek"), CSS_REGISTERS) + FPSTR(CSS_FORMS) + pageStyleEnd();

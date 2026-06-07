@@ -130,7 +130,7 @@
 #define MQTT_RECONNECT_MS 5000
 
 // ─── Firmware Version ────────────────────────────────────────
-#define FIRMWARE_VERSION "2.12.4" // Standard page structure for Modules, CSS consolidated into CSS_MODULES
+#define FIRMWARE_VERSION "2.12.5" // Standard page structure for Modules, CSS consolidated into CSS_MODULES
 
 // ─── TCP Modbus Bridge ─────────────────────────────────────────
 #define TCP_PORT 502
