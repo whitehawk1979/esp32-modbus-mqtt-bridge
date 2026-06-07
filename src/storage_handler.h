@@ -21,6 +21,7 @@
 
 // ─── Initialization ────────────────────────────────────────────
 bool storage_init();    // Mount LittleFS, format if first use, create dirs
+bool storage_mounted(); // Check if LittleFS is currently mounted
 
 // ─── Directory listing ────────────────────────────────────────
 // Returns JSON array of files: [{"name":"...","size":123},...]

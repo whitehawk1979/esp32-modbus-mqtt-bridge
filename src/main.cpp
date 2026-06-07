@@ -16,6 +16,9 @@
 #include "modbus_mqtt_ha_bridge.h"
 #include "nibe_profile.h"
 #include "kincony_profile.h"
+#ifdef USE_STORAGE
+#include "ota_storage.h"
+#endif
 
 // ─── Global State (heap-allocated for unlimited modules) ───────
 Slave_Module *modules = nullptr;
@@ -867,6 +870,10 @@ static void do_staged_init()
             LOG_ILN("[INIT] Storage OK");
             // Restore pins from /active/pins.json (overrides NVS defaults)
             storage_restore_pins();
+#ifdef USE_STORAGE
+            // Initialize storage-based OTA directory
+            ota_storage_init();
+#endif
         }
         else
             LOG_ELN("[INIT] Storage FAILED");

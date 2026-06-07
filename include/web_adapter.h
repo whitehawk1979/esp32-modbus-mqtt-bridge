@@ -73,6 +73,12 @@ public:
     virtual void requestAuthentication() = 0;
 
     virtual IPAddress clientIP() = 0;
+
+    // ─── Multipart file upload support ────────────────────────
+    // WiFi WebServer supports multipart upload; LAN (EthWebServer) does not.
+    // Callers should check isUploadSupported() before using upload().
+    virtual HTTPUpload &upload() = 0;
+    virtual bool isUploadSupported() const = 0;
 };
 
 // ─── WiFi WebServer adapter ───────────────────────────────────
@@ -102,6 +108,10 @@ public:
     void requestAuthentication() override { _server.requestAuthentication(DIGEST_AUTH, "ModbusMQTT"); }
 
     IPAddress clientIP() override { return _server.client().remoteIP(); }
+
+    // ─── Multipart upload — supported on WiFi ──────────────────
+    HTTPUpload &upload() override { return _server.upload(); }
+    bool isUploadSupported() const override { return true; }
 
 private:
     WebServer &_server;
@@ -135,6 +145,11 @@ public:
     void requestAuthentication() override { _server.requestAuthentication(); }
 
     IPAddress clientIP() override { return IPAddress(0, 0, 0, 0); } // W5500: remoteIP not available
+
+    // ─── Multipart upload — NOT supported on LAN ───────────────
+    // Returns a static dummy; callers must check isUploadSupported() first.
+    HTTPUpload &upload() override { static HTTPUpload dummy; return dummy; }
+    bool isUploadSupported() const override { return false; }
 
 private:
     EthWebServer &_server;

@@ -23,7 +23,10 @@
 #include <ArduinoJson.h>
 
 // ─── State ─────────────────────────────────────────────────────
-static bool storage_mounted = false;
+static bool s_storage_mounted = false;
+
+// ─── Public getter ────────────────────────────────────────────
+bool storage_mounted() { return s_storage_mounted; }
 
 // ─── Internal: ensure directory exists ────────────────────────
 static bool ensure_dir(const char *path)
@@ -47,7 +50,7 @@ static bool ensure_dir(const char *path)
 // ─── Mount LittleFS ────────────────────────────────────────────
 bool storage_init()
 {
-    if (storage_mounted)
+    if (s_storage_mounted)
     {
         LOG_I("[STORAGE] Already mounted\n");
         return true;
@@ -72,7 +75,7 @@ bool storage_init()
         }
     }
 
-    storage_mounted = true;
+    s_storage_mounted = true;
 
     uint64_t total = LittleFS.totalBytes();
     uint64_t used  = LittleFS.usedBytes();
@@ -89,7 +92,7 @@ bool storage_init()
 // ─── List directory as JSON array ──────────────────────────────
 bool storage_list_dir(const char *path, String &json_output)
 {
-    if (!storage_mounted)
+    if (!s_storage_mounted)
     {
         json_output = "[]";
         return false;
@@ -130,7 +133,7 @@ bool storage_list_dir(const char *path, String &json_output)
 // ─── Read file content ────────────────────────────────────────
 bool storage_read_file(const char *path, String &content)
 {
-    if (!storage_mounted)
+    if (!s_storage_mounted)
         return false;
 
     if (!LittleFS.exists(path))
@@ -156,7 +159,7 @@ bool storage_read_file(const char *path, String &content)
 // ─── Write file content ────────────────────────────────────────
 bool storage_write_file(const char *path, const char *content, size_t len)
 {
-    if (!storage_mounted)
+    if (!s_storage_mounted)
         return false;
 
     File file = LittleFS.open(path, "w");
@@ -183,7 +186,7 @@ bool storage_write_file(const char *path, const char *content, size_t len)
 // ─── Delete file ──────────────────────────────────────────────
 bool storage_delete_file(const char *path)
 {
-    if (!storage_mounted)
+    if (!s_storage_mounted)
         return false;
 
     if (!LittleFS.exists(path))
@@ -205,7 +208,7 @@ bool storage_delete_file(const char *path)
 // ─── Check if file exists ─────────────────────────────────────
 bool storage_exists(const char *path)
 {
-    if (!storage_mounted)
+    if (!s_storage_mounted)
         return false;
 
     return LittleFS.exists(path);
@@ -214,7 +217,7 @@ bool storage_exists(const char *path)
 // ─── Total space ──────────────────────────────────────────────
 uint64_t storage_total_bytes()
 {
-    if (!storage_mounted)
+    if (!s_storage_mounted)
         return 0;
 
     return LittleFS.totalBytes();
@@ -223,7 +226,7 @@ uint64_t storage_total_bytes()
 // ─── Used space ───────────────────────────────────────────────
 uint64_t storage_used_bytes()
 {
-    if (!storage_mounted)
+    if (!s_storage_mounted)
         return 0;
 
     return LittleFS.usedBytes();
@@ -236,7 +239,7 @@ uint64_t storage_used_bytes()
 // the persisted values. NVS was already loaded by config_load().
 bool storage_restore_pins()
 {
-    if (!storage_mounted)
+    if (!s_storage_mounted)
         return false;
 
     String content;

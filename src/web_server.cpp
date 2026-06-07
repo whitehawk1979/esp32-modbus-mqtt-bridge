@@ -33,6 +33,14 @@ static byte lan_mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
 void handleOtaPage();
 void handleOtaUpload();
 void handleOtaFromURL();
+#ifdef USE_STORAGE
+void ota_storage_init();
+void handleOtaStoragePage();
+void handleOtaStorageUpload();
+void handleOtaStorageApply();
+void handleOtaStorageInfo();
+void handleOtaStorageCancel();
+#endif
 void handleApiOtaRaw();
 
 WebServer web(80);
@@ -4596,10 +4604,20 @@ void web_server_init()
     web.on("/registers", HTTP_GET, handleRegisters);
     web.on("/admin", HTTP_GET, handleAdmin);
     web.on("/saveadmin", HTTP_POST, handleSaveAdmin);
-    web.on("/ota", HTTP_GET, handleOtaPage);
-    web.on("/otaupload", HTTP_POST, handleOtaUpload, handleOtaUpload);
+    web.on("/ota", HTTP_GET,
+#ifdef USE_STORAGE
+        handleOtaStoragePage
+#else
+        handleOtaPage
+#endif
+    );
+    web.on("/otaupload", HTTP_POST, handleOtaUpload, handleOtaUpload);  // Legacy direct flash
+    web.on("/otastorageupload", HTTP_POST, handleOtaStorageUpload, handleOtaStorageUpload);  // Storage-first
     web.on("/otaurl", HTTP_GET, handleOtaFromURL);  // ESP32 downloads firmware from URL (safe OTA)
-    web.on("/api/ota/raw", HTTP_POST, handleApiOtaRaw); // Raw binary POST (curl-friendly, works on LAN+WiFi)
+    web.on("/api/ota/raw", HTTP_POST, handleApiOtaRaw); // Raw binary POST (curl-friendly)
+    web.on("/ota/apply", HTTP_POST, handleOtaStorageApply);  // Flash from storage
+    web.on("/ota/info", HTTP_GET, handleOtaStorageInfo);     // Stored firmware info
+    web.on("/ota/cancel", HTTP_POST, handleOtaStorageCancel); // Delete stored firmware
     web.on("/save", HTTP_POST, handleSave);
     web.on("/savepins", HTTP_POST, handleSavePins);
     web.on("/savemodules", HTTP_POST, handleSaveModules);
@@ -4681,8 +4699,20 @@ void web_server_init()
     ethWeb.on("/modules", ETH_HTTP_GET, handleModules);
     ethWeb.on("/registers", ETH_HTTP_GET, handleRegisters);
     ethWeb.on("/admin", ETH_HTTP_GET, handleAdmin);
-    ethWeb.on("/ota", ETH_HTTP_GET, handleOtaPage);
+    ethWeb.on("/ota", ETH_HTTP_GET,
+#ifdef USE_STORAGE
+        handleOtaStoragePage
+#else
+        handleOtaPage
+#endif
+    );
     ethWeb.on("/otaurl", ETH_HTTP_GET, handleOtaFromURL);
+#ifdef USE_STORAGE
+    ethWeb.on("/ota/apply", ETH_HTTP_POST, handleOtaStorageApply);   // Flash from storage (works on LAN)
+    ethWeb.on("/ota/info", ETH_HTTP_GET, handleOtaStorageInfo);      // Stored firmware info
+    ethWeb.on("/ota/cancel", ETH_HTTP_POST, handleOtaStorageCancel); // Delete stored firmware
+    // NOTE: /otastorageupload is WiFi-only (multipart upload not supported on LAN)
+#endif
     ethWeb.on("/save", ETH_HTTP_POST, handleSave);
     ethWeb.on("/savepins", ETH_HTTP_POST, handleSavePins);
     ethWeb.on("/savemodules", ETH_HTTP_POST, handleSaveModules);
