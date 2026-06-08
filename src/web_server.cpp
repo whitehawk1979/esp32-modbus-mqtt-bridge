@@ -3563,6 +3563,103 @@ static void handleApiMbExtScanResult()
     WS->send(200, "application/json", payload);
 }
 
+// POST /api/mb/extscan/adopt?slave=1
+// Convert extended scan results into RegisterConfig entries + HA discovery + NVS save.
+// Only adopts register results (coils/DIs ignored for now — KinCony modules handle those natively).
+static void handleApiMbExtScanAdopt()
+{
+    if (!web_auth_ok()) return;
+
+    // Don't adopt during active scan
+    if (scan_slave_extended_active())
+    {
+        WS->send(409, "application/json", "{\"ok\":false,\"error\":\"scan_active\"}");
+        return;
+    }
+
+    const SlaveScanResult &result = scan_slave_extended_results();
+    if (result.reg_count == 0)
+    {
+        WS->send(200, "application/json", "{\"ok\":true,\"added\":0,\"msg\":\"no_registers\"}");
+        return;
+    }
+
+    // Check capacity
+    uint8_t available = MAX_REGISTERS - register_count;
+    if (available == 0)
+    {
+        WS->send(200, "application/json", "{\"ok\":false,\"error\":\"register_full\"}");
+        return;
+    }
+
+    uint8_t added = 0;
+    uint8_t slave = result.slave_addr;
+
+    for (uint8_t i = 0; i < result.reg_count && register_count < MAX_REGISTERS; i++)
+    {
+        const RegScanEntry &se = result.regs[i];
+
+        // Check for duplicate: same slave + same register address
+        bool duplicate = false;
+        for (uint8_t j = 0; j < register_count; j++)
+        {
+            if (registers[j].slave_addr == slave && registers[j].addr == se.addr)
+            {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) continue;
+
+        RegisterConfig &r = registers[register_count];
+        memset(&r, 0, sizeof(RegisterConfig));
+        r.addr = se.addr;
+        r.reg_type = REG_HOLDING;     // Extended scan probes FC03
+        r.ha_class = HAC_SENSOR;     // Generic sensor for unknown device
+        r.slave_addr = slave;
+        r.scale = 1;                  // Raw value
+        r.writable = se.writable;
+        r.enabled = true;
+        r.last_value = se.value;
+        r.published = false;
+        r.last_read_ms = 0;
+
+        // Generate friendly name: "S{slave}_R{addr}" (e.g. "S1_R0x0100")
+        snprintf(r.name, sizeof(r.name), "S%u_R0x%04X", slave, se.addr);
+        // No unit for unknown registers
+        r.unit[0] = '\0';
+
+        register_count++;
+        added++;
+
+        // Immediately publish HA discovery so entity appears in HA
+        if (mqtt_is_connected())
+            mqtt_publish_register_discovery(&registers[register_count - 1]);
+
+        // Feed WDT between discoveries
+        esp_task_wdt_reset();
+        yield();
+    }
+
+    // Persist to NVS
+    if (added > 0)
+        config_save_registers();
+
+    LOG_I("[ADOPT] Slave %u: %u registers adopted (total: %u/%u)\n",
+          slave, added, register_count, MAX_REGISTERS);
+
+    JsonDocument doc(PsramAllocator::instance());
+    doc["ok"] = true;
+    doc["added"] = added;
+    doc["slave"] = slave;
+    doc["register_count"] = register_count;
+    doc["register_max"] = MAX_REGISTERS;
+
+    String payload;
+    serializeJson(doc, payload);
+    WS->send(200, "application/json", payload);
+}
+
 #ifdef USE_WS2812
 // GET /api/led — current LED state
 static void handleApiLed()
@@ -3670,7 +3767,8 @@ static void handleScan()
     html += F("<label>Reg start: <input id=\"extRegStart\" type=\"number\" min=\"0\" max=\"65535\" value=\"0\" style=\"width:80px\"></label>");
     html += F("<label>Reg end: <input id=\"extRegEnd\" type=\"number\" min=\"1\" max=\"65535\" value=\"100\" style=\"width:80px\"></label></div>");
     html += F("<div class=\"fm\"><button onclick=\"startExtScan()\" id=\"btnExtScan\">&#9654; Extended Scan indítása</button>");
-    html += F("<button onclick=\"pollExtScan()\" style=\"margin-left:8px\">&#128260; Eredmény lekérdezése</button></div>");
+    html += F("<button onclick=\"pollExtScan()\" style=\"margin-left:8px\">&#128260; Eredmény lekérdezése</button>");
+    html += F("<button onclick=\"adoptExtScan()\" id=\"btnAdopt\" style=\"margin-left:8px;display:none\">&#11015; Talált regiszterek adoptálása</button></div>");
     html += F("<div id=\"extProgress\" style=\"margin-top:8px;color:#8b949e;font-size:13px\"></div>");
     html += F("<div id=\"extResult\" style=\"margin-top:12px;display:none\"></div>");
     html += F("</div>");
@@ -3780,8 +3878,17 @@ static void handleScan()
     html += F("if(d.coil_groups&&d.coil_groups.length>0){h+='<h3>Coil csoportok ('+d.coil_groups.length+')</h3>';d.coil_groups.forEach(function(c){h+='<div class=\"row\"><span class=\"key\">Coils @'+c.start+'</span><span class=\"val\">'+c.count+' db</span></div>'})}");
     html += F("if(d.di_groups&&d.di_groups.length>0){h+='<h3>DI csoportok ('+d.di_groups.length+')</h3>';d.di_groups.forEach(function(g){h+='<div class=\"row\"><span class=\"key\">DIs @'+g.start+'</span><span class=\"val\">'+g.count+' db</span></div>'})}");
     html += F("if(h){var er=document.getElementById('extResult');er.innerHTML=h;er.style.display='block'}");
+    html += F("var btnA=document.getElementById('btnAdopt');");
+    html += F("if(btnA){btnA.style.display=(!d.active&&d.registers&&d.registers.length>0)?'inline-block':'none'}");
     html += F("if(d.active)setTimeout(pollExtScan,1000)");
     html += F("})}");
+
+    html += F("function adoptExtScan(){");
+    html += F("var btnA=document.getElementById('btnAdopt');btnA.disabled=true;");
+    html += F("btnA.textContent='Adoptálás...';fetch('/api/mb/extscan/adopt'+(_auth?'?auth='+_auth:''),{method:'POST'}).then(r=>r.json()).then(d=>{");
+    html += F("if(d.ok){btnA.textContent='✓ '+d.added+' regiszter adoptálva';setTimeout(function(){btnA.textContent='⬇ Talált regiszterek adoptálása';btnA.disabled=false},3000)}");
+    html += F("else{btnA.textContent='✗ Hiba: '+(d.error||'ismeretlen');setTimeout(function(){btnA.textContent='⬇ Talált regiszterek adoptálása';btnA.disabled=false},3000)}");
+    html += F("}).catch(function(){btnA.textContent='✗ Hálózati hiba';setTimeout(function(){btnA.textContent='⬇ Talált regiszterek adoptálása';btnA.disabled=false},3000)})}");
 
     // Auto-load last scan result on page load (reuse pollExtScan renderer)
     html += F("window.addEventListener('load',function(){pollExtScan()});");
@@ -4200,7 +4307,7 @@ static void handleApiRestore()
         WS->send(400, "application/json", "{\"ok\":false,\"error\":\"invalid json\"}");
         return;
     }
-    if (!inDoc.containsKey("type") || strcmp(inDoc["type"], "modbus-mqtt-bridge-backup") != 0)
+    if (inDoc["type"].isNull() || strcmp(inDoc["type"], "modbus-mqtt-bridge-backup") != 0)
     {
         WS->send(400, "application/json", "{\"ok\":false,\"error\":\"not a valid backup\"}");
         return;
@@ -4885,6 +4992,7 @@ void web_server_init()
     web.on("/api/mb/regscan", HTTP_GET, handleApiMbRegScan);
     web.on("/api/mb/extscan", HTTP_POST, handleApiMbExtScan);
     web.on("/api/mb/extscan/result", HTTP_GET, handleApiMbExtScanResult);
+    web.on("/api/mb/extscan/adopt", HTTP_POST, handleApiMbExtScanAdopt);
     web.on("/api/mb/coil", HTTP_POST, handleApiMbCoilWrite);
     web.begin();
     LOG_ILN("[WEB] Status & Config server started on port 80");
@@ -4978,6 +5086,7 @@ void web_server_init()
     ethWeb.on("/api/mb/regscan", ETH_HTTP_GET, handleApiMbRegScan);
     ethWeb.on("/api/mb/extscan", ETH_HTTP_POST, handleApiMbExtScan);
     ethWeb.on("/api/mb/extscan/result", ETH_HTTP_GET, handleApiMbExtScanResult);
+    ethWeb.on("/api/mb/extscan/adopt", ETH_HTTP_POST, handleApiMbExtScanAdopt);
     ethWeb.on("/api/mb/coil", ETH_HTTP_POST, handleApiMbCoilWrite);
     ethWeb.on("/api/backup", ETH_HTTP_GET, handleApiBackup);
     ethWeb.on("/api/restore", ETH_HTTP_POST, handleApiRestore);

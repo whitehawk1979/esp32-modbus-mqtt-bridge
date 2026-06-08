@@ -130,7 +130,7 @@
 #define MQTT_RECONNECT_MS 5000
 
 // ─── Firmware Version ────────────────────────────────────────
-#define FIRMWARE_VERSION "2.12.14" // WiFi reconnect counter, bugfix wifi_reconnects topic, status UI split
+#define FIRMWARE_VERSION "2.12.15" // ExtScan adopt: auto-register MQTT entities from scan results
 
 // ─── TCP Modbus Bridge ─────────────────────────────────────────
 #define TCP_PORT 502
