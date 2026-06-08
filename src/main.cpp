@@ -766,6 +766,13 @@ void setup()
 
     Serial.begin(115200);
     delay(500);
+
+    // ── PSRAM auto-routing: allocations >8KB go to PSRAM ──
+    // Reduces DRAM pressure for large HTML pages, JSON docs, and OTA buffers.
+    // The ESP32-S3 has 8MB OPI PSRAM — plenty of room.
+    // NOTE: 8KB threshold avoids WiFi/LwIP buffers (4-6KB) staying in fast DRAM
+    // where DMA and cache coherency matter. HTML pages (8-24KB) still go to PSRAM.
+    heap_caps_malloc_extmem_enable(8192);
     LOG_ILN("\n\n╔═════════════════════════════════════════╗");
     LOG_I("║  Modbus-MQTT Bridge v%s — ESP32-S3-ETH ║\n", FIRMWARE_VERSION);
     LOG_ILN("║  ESP32-S3 | LAN-primary + WiFi fallback   ║");
