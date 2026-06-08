@@ -605,6 +605,8 @@ static void handleStatus()
     html += "<div class=\"row\"><span class=\"key\">HA Discovery</span><span class=\"val " +
             String(cfg.ha_discovery ? "on" : "off") + "\">" + String(cfg.ha_discovery ? "BE ✅" : "KI ❌") +
             "</span></div>";
+    html += "<div class=\"row\"><span class=\"key\">Újrakapcsolódások</span><span class=\"val\">" +
+            String(mqtt_get_reconnects()) + "</span></div>";
     html += "</div>";
 
     // Modbus modules
@@ -948,6 +950,51 @@ static void handleConfig()
 
     // Save button
     html += "<button type=\"submit\">&#128190; Mentés & Újraindítás</button></form>";
+
+    // ─── Backup / Restore ────────────────────────────────────────
+    {
+        String authQ = WS->hasArg("auth") ? ("?auth=" + WS->arg("auth")) : "";
+        html += F("<div class='card'><h2>&#128451; Biztonsági mentés</h2>");
+        html += F("<p class='note'>A biztonsági mentés JSON formátumban tartalmazza az összes beállítást. "
+                  "Jelszavak maszkolva lesznek a mentésben (importáláskor nem íródnak felül ha <code>***</code>).</p>");
+        html += "<button type='button' onclick='downloadBackup()'>&#11015; Mentés letöltése</button> ";
+        html += F("<div class='fm' style='margin-top:12px'><label>Konfig visszaállítása (.json)</label>"
+                  "<input type='file' id='restoreFile' accept='.json,application/json'></div>"
+                  "<button type='button' onclick='uploadRestore()'>&#11014; Visszaállítás</button>"
+                  "<div id='restoreStatus'></div>"
+                  "</div>");
+        // JS for backup/restore
+        html += F("<script>"
+                  "function downloadBackup(){"
+                  "var a=document.createElement('a');"
+                  "a.href='/api/backup");
+        html += htmlEscape(authQ);
+        html += F("';"
+                  "a.download='modbusmqtt-backup.json';"
+                  "a.click();"
+                  "}"
+                  "function uploadRestore(){"
+                  "var f=document.getElementById('restoreFile').files[0];"
+                  "if(!f){alert('Válassz egy fájlt!');return;}"
+                  "var r=new FileReader();"
+                  "r.onload=function(e){"
+                  "var x=new XMLHttpRequest();"
+                  "var as=location.search?('&'+location.search.substr(1)):'';"
+                  "x.open('POST','/api/restore'+as,true);"
+                  "x.setRequestHeader('Content-Type','application/json');"
+                  "x.onload=function(){"
+                  "var s=document.getElementById('restoreStatus');"
+                  "if(x.status==200){s.innerHTML='<span style=\"color:#3fb950\">&#10004; Visszaállítás sikeres! Újraindítás...</span>';"
+                  "setTimeout(function(){location.reload()},5000);}"
+                  "else{s.innerHTML='<span style=\"color:#f85149\">&#10008; Hiba: '+x.responseText+'</span>';}"
+                  "};"
+                  "x.onerror=function(){document.getElementById('restoreStatus').innerHTML='<span style=\"color:#f85149\">&#10008; Hálózati hiba!</span>';};"
+                  "x.send(e.target.result);"
+                  "};"
+                  "r.readAsText(f);"
+                  "}"
+                  "</script>");
+    }
 
     // Back to status
     html += "<div style=\"text-align:center;margin:12px 0\"><a href=\"/\" style=\"color:#58a6ff\">← Vissza a státusz "
@@ -1969,6 +2016,14 @@ static void handleApiStatus()
     doc["mqtt_connected"] = mqtt_is_connected();
     doc["mqtt_transport"] = mqtt_is_on_lan() ? "LAN" : "WiFi";
     doc["mqtt_tls"] = cfg.mqtt_tls;
+    doc["mqtt_reconnects"] = mqtt_get_reconnects();
+    // TCP bridge status
+    doc["tcp_enabled"] = cfg.tcp_enabled;
+    if (cfg.tcp_enabled)
+    {
+        doc["tcp_port"] = cfg.tcp_port;
+        doc["tcp_req_count"] = tcp_get_req_count();
+    }
     // SD Card status
     doc["sd_enabled"] = cfg.sd_enabled;
     doc["sd_ok"] = sd_is_ok();

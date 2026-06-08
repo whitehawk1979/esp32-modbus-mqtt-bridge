@@ -14,12 +14,13 @@
 #include <ArduinoOTA.h>
 #include <HTTPClient.h>
 #include <esp_task_wdt.h>
+#include "web_adapter.h"
 #include "modbus_mqtt_ha_bridge.h"
 #include "ota_handler.h"
 #include "web_templates.h"
 
-// ─── External web server (from web_server.cpp) ────────────────
-extern WebServer web;
+// ─── External web adapter (from web_server.cpp) ────────────────
+extern WebInterface *WS;
 
 // ─── Constants ────────────────────────────────────────────────
 // OTA_MAX_SIZE defined in modbus_mqtt_ha_bridge.h
@@ -27,7 +28,7 @@ extern WebServer web;
 // ─── OTA Page ─────────────────────────────────────────────────
 void handleOtaPage()
 {
-    String authSfx = web.hasArg("auth") ? "?auth=" + web.arg("auth") : "";
+    String authSfx = WS->hasArg("auth") ? "?auth=" + WS->arg("auth") : "";
 
     String html;
     html.reserve(3000);
@@ -159,7 +160,7 @@ void handleOtaPage()
               "</script>");
 
     html += pageFoot();
-    web.send(200, "text/html", html);
+    WS->send(200, "text/html", html);
 }
 
 // ─── OTA Upload Handler ──────────────────────────────────────
@@ -168,7 +169,15 @@ void handleOtaUpload()
     // Auth check for OTA — must validate before processing upload
     if (!web_auth_ok())
         return;
-    HTTPUpload &upload = web.upload();
+
+    // Multipart upload only works on WiFi interface
+    if (!WS->isUploadSupported())
+    {
+        WS->send(501, "text/plain", "Multipart upload not supported on LAN. Use WiFi interface or storage OTA.");
+        return;
+    }
+
+    HTTPUpload &upload = WS->upload();
 
     if (upload.status == UPLOAD_FILE_START)
     {
@@ -180,14 +189,14 @@ void handleOtaUpload()
         if (upload.totalSize > 0 && upload.totalSize > OTA_MAX_SIZE)
         {
             LOG_ELN("[OTA] ERROR: Firmware too large!");
-            web.send(500, "text/plain", "A firmware túl nagy! Maximum 1.25 MB.");
+            WS->send(500, "text/plain", "A firmware túl nagy! Maximum 1.25 MB.");
             return;
         }
 
         if (!Update.begin(updateSize))
         {
             LOG_E("[OTA] ERROR: Update.begin failed! (%s)\n", Update.errorString());
-            web.send(500, "text/plain", String("Nem sikerült elindítani a frissítést: ") + Update.errorString());
+            WS->send(500, "text/plain", String("Nem sikerült elindítani a frissítést: ") + Update.errorString());
             return;
         }
         LOG_ILN("[OTA] Update started...");
@@ -208,7 +217,7 @@ void handleOtaUpload()
         if (written != upload.currentSize)
         {
             LOG_E("[OTA] ERROR: Write failed! Written %d / %d\n", written, upload.currentSize);
-            web.send(500, "text/plain", String("Írási hiba: ") + Update.errorString());
+            WS->send(500, "text/plain", String("Írási hiba: ") + Update.errorString());
             return;
         }
 
@@ -226,21 +235,21 @@ void handleOtaUpload()
         if (Update.end(true))
         {
             LOG_I("[OTA] SUCCESS! Firmware updated (%d bytes). Restarting...\n", Update.size());
-            web.send(200, "text/plain", "OK");
+            WS->send(200, "text/plain", "OK");
             delay(3000);
             eth_hard_reset_and_restart();
         }
         else
         {
             LOG_E("[OTA] ERROR: Update.end failed! (%s)\n", Update.errorString());
-            web.send(500, "text/plain", String("Frissítés sikertelen: ") + Update.errorString());
+            WS->send(500, "text/plain", String("Frissítés sikertelen: ") + Update.errorString());
         }
     }
     else if (upload.status == UPLOAD_FILE_ABORTED)
     {
         LOG_ELN("[OTA] Upload aborted!");
         Update.abort();
-        web.send(500, "text/plain", "Feltöltés megszakítva!");
+        WS->send(500, "text/plain", "Feltöltés megszakítva!");
     }
 }
 
@@ -252,14 +261,14 @@ void handleOtaFromURL()
     if (!web_auth_ok())
         return;
 
-    if (!web.hasArg("url"))
+    if (!WS->hasArg("url"))
     {
-        web.send(400, "application/json",
+        WS->send(400, "application/json",
                   "{\"error\":\"missing 'url' parameter\"}");
         return;
     }
 
-    String fwUrl = web.arg("url");
+    String fwUrl = WS->arg("url");
     LOG_I("[OTA-URL] Downloading firmware from: %s\n", fwUrl.c_str());
 
     HTTPClient http;
@@ -271,7 +280,7 @@ void handleOtaFromURL()
     if (!http.begin(fwUrl))
     {
         LOG_ELN("[OTA-URL] Failed to connect to URL");
-        web.send(500, "application/json",
+        WS->send(500, "application/json",
                  "{\"error\":\"connection_failed\"}");
         return;
     }
@@ -281,7 +290,7 @@ void handleOtaFromURL()
     {
         LOG_E("[OTA-URL] HTTP error: %d\n", httpCode);
         http.end();
-        web.send(500, "application/json",
+        WS->send(500, "application/json",
                  "{\"error\":\"http_error\",\"code\":" + String(httpCode) + "}");
         return;
     }
@@ -291,7 +300,7 @@ void handleOtaFromURL()
     {
         LOG_E("[OTA-URL] Invalid content length: %d\n", contentLength);
         http.end();
-        web.send(500, "application/json",
+        WS->send(500, "application/json",
                  "{\"error\":\"invalid_size\",\"size\":" + String(contentLength) + "}");
         return;
     }
@@ -300,7 +309,7 @@ void handleOtaFromURL()
     {
         LOG_E("[OTA-URL] Update.begin failed: %s\n", Update.errorString());
         http.end();
-        web.send(500, "application/json",
+        WS->send(500, "application/json",
                  "{\"error\":\"update_begin_failed\"}");
         return;
     }
@@ -325,7 +334,7 @@ void handleOtaFromURL()
                 LOG_E("[OTA-URL] Write error at %d bytes\n", totalWritten);
                 Update.abort();
                 http.end();
-                web.send(500, "application/json",
+                WS->send(500, "application/json",
                          "{\"error\":\"write_failed\",\"at\":" + String(totalWritten) + "}");
                 return;
             }
@@ -354,14 +363,14 @@ void handleOtaFromURL()
         LOG_I("[OTA-URL] SUCCESS! Firmware updated (%d bytes). Rebooting...\n", totalWritten);
         char okBuf[80];
         snprintf(okBuf, sizeof(okBuf), "{\"status\":\"ok\",\"bytes\":%d,\"rebooting\":true}", totalWritten);
-        web.send(200, "application/json", okBuf);
+        WS->send(200, "application/json", okBuf);
         delay(3000);
         eth_hard_reset_and_restart();
     }
     else
     {
         LOG_E("[OTA-URL] Update.end failed: %s\n", Update.errorString());
-        web.send(500, "application/json",
+        WS->send(500, "application/json",
                  "{\"error\":\"update_end_failed\"}");
     }
 }
@@ -416,22 +425,22 @@ void handleApiOtaRaw()
     // Auth check via web server credentials
     if (cfg.web_auth && strlen(cfg.web_pass) > 0)
     {
-        if (!web.authenticate("admin", cfg.web_pass) &&
-            !(web.hasArg("auth") && web.arg("auth") == String(cfg.web_pass)))
+        if (!WS->authenticate("admin", cfg.web_pass) &&
+            !(WS->hasArg("auth") && WS->arg("auth") == String(cfg.web_pass)))
         {
-            web.requestAuthentication();
+            WS->requestAuthentication();
             return;
         }
     }
 
     // Get firmware size from query param (required: ?size=NNNN)
     // WebServer doesn't parse Content-Length header by default
-    int contentLen = web.arg("size").toInt();
+    int contentLen = WS->arg("size").toInt();
     LOG_I("[OTA-RAW] Requested size: %d\n", contentLen);
 
     if (contentLen <= 0 || contentLen > OTA_MAX_SIZE)
     {
-        web.send(400, "application/json",
+        WS->send(400, "application/json",
                  "{\"error\":\"invalid_size\",\"size\":" + String(contentLen) + "}");
         return;
     }
@@ -439,7 +448,7 @@ void handleApiOtaRaw()
     if (!Update.begin((size_t)contentLen))
     {
         LOG_E("[OTA-RAW] Update.begin failed: %s\n", Update.errorString());
-        web.send(500, "application/json",
+        WS->send(500, "application/json",
                  "{\"error\":\"update_begin_failed\",\"detail\":\"" + String(Update.errorString()) + "\"}");
         return;
     }
@@ -454,32 +463,32 @@ void handleApiOtaRaw()
     while (remaining > 0)
     {
         size_t toRead = (remaining > sizeof(buf)) ? sizeof(buf) : remaining;
-        size_t avail = web.client().available();
+        size_t avail = WS->clientStream().available();
         if (avail < toRead)
         {
             // Wait for data with timeout
             uint32_t t0 = millis();
-            while (web.client().available() < (int)(toRead) && millis() - t0 < 5000)
+            while (WS->clientStream().available() < (int)(toRead) && millis() - t0 < 5000)
             {
                 delay(1);
             }
-            avail = web.client().available();
+            avail = WS->clientStream().available();
             if (avail == 0)
             {
                 LOG_ELN("[OTA-RAW] Data timeout!");
                 Update.abort();
                 enableLoopWDT();
-                web.send(500, "application/json", "{\"error\":\"data_timeout\"}");
+                WS->send(500, "application/json", "{\"error\":\"data_timeout\"}");
                 return;
             }
         }
-        size_t bytesRead = web.client().readBytes(buf, toRead);
+        size_t bytesRead = WS->clientStream().readBytes(buf, toRead);
         if (bytesRead == 0)
         {
             LOG_ELN("[OTA-RAW] Read 0 bytes — connection lost?");
             Update.abort();
             enableLoopWDT();
-            web.send(500, "application/json", "{\"error\":\"read_failed\"}");
+            WS->send(500, "application/json", "{\"error\":\"read_failed\"}");
             return;
         }
         size_t written = Update.write(buf, bytesRead);
@@ -488,7 +497,7 @@ void handleApiOtaRaw()
             LOG_E("[OTA-RAW] Write mismatch: written=%d expected=%d\n", written, bytesRead);
             Update.abort();
             enableLoopWDT();
-            web.send(500, "application/json", "{\"error\":\"write_failed\"}");
+            WS->send(500, "application/json", "{\"error\":\"write_failed\"}");
             return;
         }
         totalWritten += written;
@@ -501,7 +510,7 @@ void handleApiOtaRaw()
     {
         LOG_ILN("[OTA-RAW] ✅ Update OK! Rebooting...");
         enableLoopWDT();
-        web.send(200, "application/json", "{\"ok\":true,\"size\":" + String(totalWritten) + "}");
+        WS->send(200, "application/json", "{\"ok\":true,\"size\":" + String(totalWritten) + "}");
         delay(500);
         eth_hard_reset_and_restart();
     }
@@ -509,7 +518,7 @@ void handleApiOtaRaw()
     {
         LOG_E("[OTA-RAW] Update.end failed: %s\n", Update.errorString());
         enableLoopWDT();
-        web.send(500, "application/json",
+        WS->send(500, "application/json",
                  "{\"error\":\"update_end_failed\",\"detail\":\"" + String(Update.errorString()) + "\"}");
     }
 }

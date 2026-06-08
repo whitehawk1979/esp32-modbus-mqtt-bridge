@@ -74,6 +74,11 @@ public:
 
     virtual IPAddress clientIP() = 0;
 
+    // ─── Raw client stream access (for OTA raw API) ────────
+    // Returns reference to the underlying Client (WiFiClient or EthernetClient).
+    // Use for low-level stream reads (e.g., OTA raw firmware upload).
+    virtual Client &clientStream() = 0;
+
     // ─── Multipart file upload support ────────────────────────
     // WiFi WebServer supports multipart upload; LAN (EthWebServer) does not.
     // Callers should check isUploadSupported() before using upload().
@@ -108,6 +113,7 @@ public:
     void requestAuthentication() override { _server.requestAuthentication(DIGEST_AUTH, "ModbusMQTT"); }
 
     IPAddress clientIP() override { return _server.client().remoteIP(); }
+    Client &clientStream() override { _activeClient = _server.client(); return _activeClient; }
 
     // ─── Multipart upload — supported on WiFi ──────────────────
     HTTPUpload &upload() override { return _server.upload(); }
@@ -115,6 +121,7 @@ public:
 
 private:
     WebServer &_server;
+    WiFiClient _activeClient; // cached for clientStream() reference
 };
 
 #ifdef USE_W5500
@@ -144,7 +151,13 @@ public:
     bool authenticate(const char *user, const char *pass) override { return _server.authenticate(user, pass); }
     void requestAuthentication() override { _server.requestAuthentication(); }
 
-    IPAddress clientIP() override { return IPAddress(0, 0, 0, 0); } // W5500: remoteIP not available
+    IPAddress clientIP() override
+    {
+        if (_server.client())
+            return _server.client().remoteIP();
+        return IPAddress(0, 0, 0, 0);
+    }
+    Client &clientStream() override { return _server.client(); }
 
     // ─── Multipart upload — NOT supported on LAN ───────────────
     // Returns a static dummy; callers must check isUploadSupported() first.

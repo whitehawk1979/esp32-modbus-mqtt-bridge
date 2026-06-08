@@ -832,8 +832,13 @@ void setup()
     {
         MDNS.addService("http", "tcp", 80);    // Web UI
         MDNS.addService("ws", "tcp", 81);      // WebSocket
-        MDNS.addService("modbus", "tcp", 502); // Modbus TCP gateway
-        LOG_I("[SYS] ✓ mDNS: %s.local (http:80, ws:81, modbus:502)\n", cfg.hostname);
+        if (cfg.tcp_enabled)
+        {
+            MDNS.addService("modbus", "tcp", TCP_PORT); // Modbus TCP gateway
+            MDNS.addServiceTxt("modbus", "tcp", "version", FIRMWARE_VERSION);
+        }
+        LOG_I("[SYS] ✓ mDNS: %s.local (http:80, ws:81%s)\n", cfg.hostname,
+              cfg.tcp_enabled ? ", modbus:502" : "");
     }
     else
     {

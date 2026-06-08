@@ -130,7 +130,7 @@
 #define MQTT_RECONNECT_MS 5000
 
 // ─── Firmware Version ────────────────────────────────────────
-#define FIRMWARE_VERSION "2.12.12" // WDT reason logging, WiFi power save, API improvements
+#define FIRMWARE_VERSION "2.12.13" // WDT reason logging, WiFi power save, API improvements
 
 // ─── TCP Modbus Bridge ─────────────────────────────────────────
 #define TCP_PORT 502
