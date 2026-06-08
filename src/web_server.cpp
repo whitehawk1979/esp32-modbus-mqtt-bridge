@@ -1949,6 +1949,7 @@ static void handleApiStatus()
     doc["psram_free"] = psram_free();
     doc["psram_total"] = psram_total();
     doc["wdt_reboots"] = wdt_get_reboots();
+    doc["wdt_last_reason"] = wdt_get_last_reason();
     doc["interface"] = cfg.active_if == NET_IF_LAN ? "LAN" : cfg.active_if == NET_IF_WIFI ? "WiFi" : "NONE";
     doc["ip"] = active_ip;
     // Dual-stack: always show both interfaces
@@ -3034,6 +3035,7 @@ static void handleApiDiag()
     doc["psram_free"] = ESP.getFreePsram();
     doc["psram_total"] = ESP.getPsramSize();
     doc["wdt_reboots"] = wdt_get_reboots();
+    doc["wdt_last_reason"] = wdt_get_last_reason();
 
     // ── WiFi ──
     doc["wifi_ip"] = WiFi.localIP().toString();

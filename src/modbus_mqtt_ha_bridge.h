@@ -130,7 +130,7 @@
 #define MQTT_RECONNECT_MS 5000
 
 // ─── Firmware Version ────────────────────────────────────────
-#define FIRMWARE_VERSION "2.12.8" // Standard page structure for Modules, CSS consolidated into CSS_MODULES
+#define FIRMWARE_VERSION "2.12.9" // WDT reason logging, WiFi power save, API improvements
 
 // ─── TCP Modbus Bridge ─────────────────────────────────────────
 #define TCP_PORT 502
@@ -285,6 +285,7 @@ struct RegisterConfig
     RegHAClass ha_class;  // HA device_class mapping
     uint8_t  slave_addr;  // Which slave to read from
     uint16_t scale;       // Divisor for display (10 = divide by 10, 1 = raw)
+    bool     writable;    // True if FC06 can write this register
     char     name[24];    // Friendly name (e.g. "Kültér hőmérséklet")
     char     unit[8];     // Unit string (e.g. "°C", "W", "kWh")
     bool     enabled;     // Enable/disable this register
@@ -294,7 +295,7 @@ struct RegisterConfig
     uint32_t last_read_ms;// Last successful read timestamp
 };
 
-#define MAX_REGISTERS 32  // Max configurable registers
+#define MAX_REGISTERS 48  // Max configurable registers (was 32, raised for multi-slave profiles)
 
 // NVS keys for register persistence
 #define NV_KEY_REG_COUNT "regcnt"   // Number of saved registers
@@ -685,6 +686,7 @@ void wdt_loop_tick_reset();
 void wdt_notify_publish();
 void wdt_reboot(const char *reason);
 uint32_t wdt_get_reboots();
+const char *wdt_get_last_reason();
 
 // ws_handler.cpp
 void ws_init();

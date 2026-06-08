@@ -81,19 +81,43 @@ def main():
         print(f"  WARNING: Could not verify chip: {out[:200]}")
 
     # Flash firmware only (preserves NVRAM, bootloader, partitions)
-    print(f"\nFlashing firmware at {FLASH_ADDR}...")
-    flash_cmd = f"esptool --chip esp32s3 --port {PORT} --baud {BAUD} " \
-                f"--before default-reset --after hard-reset " \
-                f"write-flash {FLASH_ADDR} {REMOTE_DIR}/firmware.bin 2>&1"
-    rc, out, err = ssh_exec(ssh, flash_cmd, timeout=120)
-    print(out[-600:] if len(out) > 600 else out)
+    # IMPORTANT: Write to BOTH OTA partitions (app0 + app1) because
+    # the bootloader may boot from either depending on otadata.
+    APP0_ADDR = "0x20000"    # ota_0 partition
+    APP1_ADDR = "0x320000"   # ota_1 partition
 
-    if rc != 0 and "Hash of data verified" not in out:
-        print(f"\n❌ FAILED! Exit code: {rc}")
-        if err:
-            print(f"Error: {err[:500]}")
-        ssh.close()
-        sys.exit(1)
+    for label, addr in [("APP0", APP0_ADDR), ("APP1", APP1_ADDR)]:
+        print(f"\nFlashing {label} at {addr}...")
+        flash_cmd = f"esptool --chip esp32s3 --port {PORT} --baud {BAUD} " \
+                    f"--before default-reset --after hard-reset " \
+                    f"write-flash {addr} {REMOTE_DIR}/firmware.bin 2>&1"
+        rc, out, err = ssh_exec(ssh, flash_cmd, timeout=120)
+        print(out[-400:] if len(out) > 400 else out)
+
+        if rc != 0 and "Hash of data verified" not in out:
+            print(f"\n❌ FAILED {label}! Exit code: {rc}")
+            if err:
+                print(f"Error: {err[:500]}")
+            ssh.close()
+            sys.exit(1)
+
+    # Set otadata so bootloader uses app0 (factory fresh)
+    # Write otadata: seq0=1, crc0 valid → boot from app0
+    ota_cmd = f'python3 -c "' \
+              f'import struct,esptool' \
+              f'; data=bytearray(0x2000)' \
+              f'; struct.pack_into("<II",data,0,1,0)' \
+              f'; struct.pack_into("<II",data,16,0xE19D0159,0)' \
+              f'; open("/tmp/otadata.bin","wb").write(data)' \
+              f'; print("otadata written")' \
+              f'" 2>&1'
+    rc, out, err = ssh_exec(ssh, ota_cmd, timeout=10)
+    print(f"\notadata prepare: {out.strip()}")
+    
+    ota_flash = f"esptool --chip esp32s3 --port {PORT} --baud {BAUD} " \
+                f"--before default-reset --after hard-reset " \
+                f"write-flash 0x10000 /tmp/otadata.bin 2>&1"
+    # Note: otadata write is optional — both partitions have same firmware now
 
     # Boot — send reset signal
     print("\nBooting ESP32...")

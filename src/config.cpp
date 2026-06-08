@@ -1151,7 +1151,7 @@ bool config_validate()
 // ─── Register Config Persistence ─────────────────────────────────
 
 // NVS binary blob: persistent part of RegisterConfig (fields before runtime fields)
-// Pack: addr(2) + reg_type(1) + ha_class(1) + slave_addr(1) + pad(1) + scale(2) + name(24) + unit(8) + enabled(1)
+// Includes: addr, reg_type, ha_class, slave_addr, scale, writable, name, unit, enabled
 // We use offsetof(RegisterConfig, last_value) as the blob size
 
 void config_load_registers()
@@ -1176,7 +1176,10 @@ void config_load_registers()
 
         if (stored_len > 0 && stored_len <= persist_size)
         {
-            nv.getBytes(key, &registers[i], persist_size);
+            // Only read stored_len bytes (may be smaller than persist_size
+            // if RegisterConfig struct was extended with new fields).
+            // memset above already zeroed the whole struct.
+            nv.getBytes(key, &registers[i], stored_len);
         }
         else
         {

@@ -20,12 +20,15 @@
 #define WDT_HEAP_WARN 20480       // 20KB free heap warning
 #define WDT_ERR_FLOOD_PCT 80      // >80% error rate → warn
 #define NV_KEY_WDT_REBOOTS "wdt_rb"
+#define NV_KEY_WDT_REASON  "wdt_rsn"
+#define WDT_REASON_MAX_LEN 32
 
 // ─── State ──────────────────────────────────────────────────────
 static uint32_t wdt_loop_tick = 0;
 static uint32_t wdt_last_publish = 0;
 static uint32_t wdt_bus_busy_since = 0;
 static uint32_t wdt_reboots = 0;
+static char wdt_last_reason[WDT_REASON_MAX_LEN] = {0};
 static bool wdt_initialized = false;
 
 // ─── Public API ─────────────────────────────────────────────────
@@ -40,13 +43,14 @@ void wdt_init()
     Preferences nv;
     nv.begin(NV_NAMESPACE, true);
     wdt_reboots = nv.getUInt(NV_KEY_WDT_REBOOTS, 0);
+    nv.getString(NV_KEY_WDT_REASON, wdt_last_reason, sizeof(wdt_last_reason));
     nv.end();
 
     wdt_loop_tick = millis();
     wdt_last_publish = millis();
     wdt_initialized = true;
 
-    LOG_I("[WDT] Initialized (reboots=%u)\n", wdt_reboots);
+    LOG_I("[WDT] Initialized (reboots=%u, last_reason='%s')\n", wdt_reboots, wdt_last_reason);
 }
 
 void wdt_loop_tick_reset()
@@ -129,9 +133,14 @@ void wdt_reboot(const char *reason)
     LOG_E("[WDT] Rebooting: %s\n", reason);
 
     wdt_reboots++;
+    // Save reason (truncated to fit)
+    strncpy(wdt_last_reason, reason, sizeof(wdt_last_reason) - 1);
+    wdt_last_reason[sizeof(wdt_last_reason) - 1] = '\0';
+
     Preferences nv;
     nv.begin(NV_NAMESPACE, false);
     nv.putUInt(NV_KEY_WDT_REBOOTS, wdt_reboots);
+    nv.putString(NV_KEY_WDT_REASON, wdt_last_reason);
     nv.end();
 
     delay(100);
@@ -141,4 +150,9 @@ void wdt_reboot(const char *reason)
 uint32_t wdt_get_reboots()
 {
     return wdt_reboots;
+}
+
+const char *wdt_get_last_reason()
+{
+    return wdt_last_reason;
 }

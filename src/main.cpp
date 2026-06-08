@@ -16,6 +16,7 @@
 #include "modbus_mqtt_ha_bridge.h"
 #include "nibe_profile.h"
 #include "kincony_profile.h"
+#include "sabiana_profile.h"
 #ifdef USE_STORAGE
 #include "ota_storage.h"
 #endif
@@ -182,6 +183,8 @@ static void wifi_connect()
         WiFi.softAPdisconnect(true);
         LOG_I("[WiFi] Mode: STA only\n");
     }
+    // WiFi power save: disabled during boot for stability.
+    // Will be enabled later in wifi_maintain() after stable WiFi connection.
     WiFi.setSleep(false);
 
     if (!cfg.wifi_dhcp && strlen(cfg.wifi_ip) > 0)
@@ -229,6 +232,18 @@ static void wifi_maintain()
             LOG_ILN("[WiFi] Reconnecting (LAN fallback)...");
             WiFi.reconnect();
             last_reconnect = millis();
+        }
+    }
+    else
+    {
+        // Enable WiFi power save after stable connection (~30-40mA saving)
+        // Only enable once after boot + successful WiFi connect
+        static bool wifi_ps_enabled = false;
+        if (!wifi_ps_enabled && millis() > 30000) // 30s after boot
+        {
+            WiFi.setSleep(true); // WIFI_PS_MIN_MODEM
+            wifi_ps_enabled = true;
+            LOG_ILN("[WiFi] Power save enabled (MIN_MODEM)");
         }
     }
 }
@@ -526,6 +541,28 @@ static void poll_all_modules()
         // Set current module context for click callback
         mqtt_set_click_module(&mod);
 
+        // ── Backoff: skip offline/failing modules ──
+        // Exponential backoff based on fail_count:
+        //   0: no delay (online), 1-5: 2×poll, 6-15: 4×, 16+: 8×
+        if (mod.fail_count > 0)
+        {
+            uint32_t backoff_interval = cfg.mb_poll_ms;
+            if (mod.fail_count <= 5)
+                backoff_interval *= 2;
+            else if (mod.fail_count <= 15)
+                backoff_interval *= 4;
+            else
+                backoff_interval *= 8;
+
+            if (millis() - mod.last_seen_ms < backoff_interval)
+            {
+                mqtt_set_click_module(nullptr);
+                continue; // Skip — backoff period not elapsed
+            }
+        }
+        // NOTE: mod.last_seen_ms is set to millis() on each poll attempt (success OR fail)
+        // by the fail_count handler below, so backoff counts from last attempt.
+
         uint8_t profile = effective_profile(&mod);
 
         // ── Adaptive Modbus timeout ──
@@ -662,6 +699,7 @@ static void poll_all_modules()
             else
             {
                 mod.fail_count++;
+                mod.last_seen_ms = millis(); // Update for backoff timer
                 if (mod.fail_count >= 5 && mod.online)
                 {
                     mod.online = false;
@@ -747,9 +785,18 @@ void setup()
             config_save_registers();
             LOG_I("[PROFILE] Auto-loaded NIBE S1156-18 profile: %u registers\n", register_count);
             break;
+        case MB_PROFILE_SABIANA:
+            // Load Sabiana profile for each fan-coil slave (1-5)
+            for (uint8_t s = 1; s <= SABIANA_SLAVE_COUNT; s++)
+            {
+                sabiana_load_profile(registers, &register_count, s);
+            }
+            config_save_registers();
+            LOG_I("[PROFILE] Auto-loaded Sabiana profile: %u registers (%u slaves)\n",
+                  register_count, SABIANA_SLAVE_COUNT);
+            break;
         // MB_PROFILE_KC868_HA uses DI/Relay polling, not registers
         // MB_PROFILE_GENERIC: user configures manually
-        // MB_PROFILE_SABIANA: future — JSON profile from /profiles/
         default:
             LOG_I("[PROFILE] No auto-profile for mode %u\n", cfg.mb_profile);
             break;

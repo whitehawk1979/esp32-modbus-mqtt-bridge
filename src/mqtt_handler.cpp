@@ -327,6 +327,15 @@ void mqtt_loop()
                 {
                     if (registers[i].enabled)
                         mqtt_publish_register_discovery(&registers[i]);
+                    // Subscribe to writable register set commands
+                    if (registers[i].enabled && registers[i].writable)
+                    {
+                        static char reg_cmd_topic[128];
+                        snprintf(reg_cmd_topic, sizeof(reg_cmd_topic),
+                                 "%s/reg/%u/%u/set", cfg.mqtt_prefix,
+                                 registers[i].slave_addr, registers[i].addr);
+                        mqtt.subscribe(reg_cmd_topic, MQTT_QOS);
+                    }
                 }
 #ifdef USE_WS2812
                 // ── LED: discovery, subscribe, state ──
@@ -394,6 +403,53 @@ static void mqtt_callback(char *topic, byte *payload, unsigned int length)
     if (led_handle_command(topic, msg, length))
         return;  // Handled
 #endif
+
+    // ── Register write command: {prefix}/reg/{slave}/{addr}/set ──
+    {
+        String reg_prefix = String(cfg.mqtt_prefix) + "/reg/";
+        String t = String(topic);
+        if (t.startsWith(reg_prefix) && t.endsWith("/set"))
+        {
+            // Parse: reg/{slave}/{addr}/set
+            int p1 = reg_prefix.length();
+            int p2 = t.indexOf('/', p1);
+            int p3 = t.indexOf("/set", p2);
+            if (p2 > 0 && p3 > 0)
+            {
+                int slave = t.substring(p1, p2).toInt();
+                int addr = t.substring(p2 + 1, p3).toInt();
+                float value = atof(msg);
+
+                // Find matching register
+                for (uint8_t i = 0; i < register_count; i++)
+                {
+                    if (registers[i].slave_addr == slave &&
+                        registers[i].addr == addr &&
+                        registers[i].writable &&
+                        registers[i].enabled)
+                    {
+                        uint16_t raw = (registers[i].scale > 0)
+                            ? (uint16_t)(value * registers[i].scale + 0.5f)
+                            : (uint16_t)value;
+
+                        LOG_I("[MQTT] Register write: S%d R%04X = %u (raw from %.2f)\n",
+                              slave, addr, raw, value);
+
+                        if (modbus_write_register(slave, addr, raw))
+                        {
+                            // Update local state immediately
+                            registers[i].last_value = value;
+                            registers[i].published = true;
+                            mqtt_publish_register_value(&registers[i]);
+                        }
+                        return; // Handled
+                    }
+                }
+                LOG_E("[MQTT] No writable register found: S%d R%04X\n", slave, addr);
+            }
+            return; // Register topic, but parse failed
+        }
+    }
 
     String t = String(topic);
     String prefix = String(cfg.mqtt_prefix) + "/ha_v2/";
@@ -1141,18 +1197,48 @@ void mqtt_publish_register_discovery(RegisterConfig *reg)
     // Availability
     set_availability(doc);
 
-    // Device block — register belongs to the bridge device
-    static char bridge_id[64];
-    snprintf(bridge_id, sizeof(bridge_id), "%s_bridge", cfg.hostname);
-    doc["device"]["identifiers"] = bridge_id;
-    doc["device"]["name"] = String(cfg.hostname) + " Bridge";
-    doc["device"]["mf"] = "Waveshare";
-    doc["device"]["mdl"] = "ESP32-S3-ETH V1.0";
-    doc["device"]["sw"] = FIRMWARE_VERSION;
+    // ── Writable registers: HA "number" entity with command topic ──
+    if (reg->writable)
+    {
+        // Command topic: MQTT → Modbus write
+        static char cmd_topic[128];
+        snprintf(cmd_topic, sizeof(cmd_topic), "%s/reg/%u/%u/set", cfg.mqtt_prefix, reg->slave_addr, reg->addr);
+        doc["command_topic"] = cmd_topic;
 
-    // Discovery topic: homeassistant/sensor/hostname_sN_rNNNN/config
-    static char disc_topic[192];
-    snprintf(disc_topic, sizeof(disc_topic), "homeassistant/sensor/%s/config", uid);
+        // Min/max defaults for number entity
+        doc["min"] = 0;
+        doc["max"] = 65535;
+        doc["step"] = (reg->scale > 0) ? (1.0 / reg->scale) : 1;
 
-    discovery_publish(disc_topic, doc, true);
+        // Device block
+        static char bridge_id[64];
+        snprintf(bridge_id, sizeof(bridge_id), "%s_bridge", cfg.hostname);
+        doc["device"]["identifiers"] = bridge_id;
+        doc["device"]["name"] = String(cfg.hostname) + " Bridge";
+        doc["device"]["mf"] = "Waveshare";
+        doc["device"]["mdl"] = "ESP32-S3-ETH V1.0";
+        doc["device"]["sw"] = FIRMWARE_VERSION;
+
+        // Discovery topic: homeassistant/number/hostname_sN_rNNNN/config
+        static char num_topic[192];
+        snprintf(num_topic, sizeof(num_topic), "homeassistant/number/%s/config", uid);
+        discovery_publish(num_topic, doc, true);
+    }
+    else
+    {
+        // ── Read-only registers: HA "sensor" entity ──
+        // Device block — register belongs to the bridge device
+        static char bridge_id[64];
+        snprintf(bridge_id, sizeof(bridge_id), "%s_bridge", cfg.hostname);
+        doc["device"]["identifiers"] = bridge_id;
+        doc["device"]["name"] = String(cfg.hostname) + " Bridge";
+        doc["device"]["mf"] = "Waveshare";
+        doc["device"]["mdl"] = "ESP32-S3-ETH V1.0";
+        doc["device"]["sw"] = FIRMWARE_VERSION;
+
+        // Discovery topic: homeassistant/sensor/hostname_sN_rNNNN/config
+        static char disc_topic[192];
+        snprintf(disc_topic, sizeof(disc_topic), "homeassistant/sensor/%s/config", uid);
+        discovery_publish(disc_topic, doc, true);
+    }
 }

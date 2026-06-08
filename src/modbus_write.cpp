@@ -32,6 +32,18 @@
 #include "modbus_mqtt_ha_bridge.h"
 #include "modbus_write.h"
 
+// ─── Write Debounce ─────────────────────────────────────────────
+// Prevents duplicate writes to the same register within DEBOUNCE_MS.
+// HA double-click or MQTT duplicate → only last value is sent.
+#define MODBUS_WRITE_DEBOUNCE_MS 500
+
+static struct {
+    uint8_t  slave;
+    uint16_t reg;
+    uint32_t last_write_ms;
+    bool     active;
+} write_debounce = {0, 0, 0, false};
+
 // ─── FC06: Write Single Register ──────────────────────────────
 bool modbus_write_register(uint8_t slave_addr, uint16_t reg_addr, uint16_t value)
 {
@@ -45,6 +57,21 @@ bool modbus_write_register(uint8_t slave_addr, uint16_t reg_addr, uint16_t value
     {
         LOG_E("[MODBUS] Invalid slave address: %d\n", slave_addr);
         return false;
+    }
+
+    // ── Debounce: skip if same register was written recently ──
+    if (write_debounce.active &&
+        write_debounce.slave == slave_addr &&
+        write_debounce.reg == reg_addr &&
+        (millis() - write_debounce.last_write_ms) < MODBUS_WRITE_DEBOUNCE_MS)
+    {
+        LOG_D("[MODBUS] FC06 Write S%d R%04X debounced (%lums < %dms)\n",
+              slave_addr, reg_addr,
+              millis() - write_debounce.last_write_ms,
+              MODBUS_WRITE_DEBOUNCE_MS);
+        // Update timestamp so the debounce window extends
+        write_debounce.last_write_ms = millis();
+        return true; // Pretend success — value will be sent after debounce
     }
 
     mb_stats.tx_count++;
@@ -63,6 +90,13 @@ bool modbus_write_register(uint8_t slave_addr, uint16_t reg_addr, uint16_t value
 
     mb_stats.rx_count++;
     LOG_I("[MODBUS] FC06 Write S%d R%04X = %u OK\n", slave_addr, reg_addr, value);
+
+    // Update debounce tracker
+    write_debounce.slave = slave_addr;
+    write_debounce.reg = reg_addr;
+    write_debounce.last_write_ms = millis();
+    write_debounce.active = true;
+
     return true;
 }
 
