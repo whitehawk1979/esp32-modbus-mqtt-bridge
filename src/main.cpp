@@ -28,6 +28,18 @@ uint16_t module_count = 0;
 uint16_t modules_capacity = 0;
 bool scanning_done = false;
 
+// ─── Auto-ExtScan Queue (unknown devices discovered during normal scan) ──
+#define AUTO_EXTSCAN_QUEUE_SIZE 8
+struct AutoExtScanEntry {
+    uint8_t  slave_addr;
+    uint16_t reg_start;
+    uint16_t reg_end;
+};
+static AutoExtScanEntry auto_extscan_queue[AUTO_EXTSCAN_QUEUE_SIZE];
+static uint8_t auto_extscan_count = 0;
+static uint8_t auto_extscan_idx = 0;
+static bool auto_extscan_active = false;
+
 // ─── Register Config State ──────────────────────────────────────
 RegisterConfig registers[MAX_REGISTERS];
 uint8_t register_count = 0;
@@ -446,6 +458,35 @@ static bool scan_modbus_next()
                 sr.firmware_ver = model.firmware_ver;
                 strncpy(sr.model_name, model.model_name, sizeof(sr.model_name) - 1);
                 sr.identified = true;
+            }
+        }
+    }
+    else
+    {
+        // FC43 not supported — try FC03 register 0 probe to detect unknown Modbus devices
+        uint16_t test_val = 0;
+        if (modbus_read_register(scan_addr, REG_HOLDING, 0, &test_val))
+        {
+            // Unknown device responds to FC03 but not FC43 — queue for auto-extscan
+            LOG_I("[SCAN] Addr %d: FC43 N/A, FC03 OK (val=%u) — auto-extscan queued\n",
+                  scan_addr, test_val);
+
+            // Add to scan result buffer as unidentified device
+            if (scan_result_count < MAX_SCAN_RESULTS) {
+                ScanResult &sr = scan_results[scan_result_count++];
+                sr.addr = scan_addr;
+                sr.model_id = 0;
+                sr.firmware_ver = 0;
+                snprintf(sr.model_name, sizeof(sr.model_name), "Unknown (S%d)", scan_addr);
+                sr.identified = false;
+            }
+
+            // Queue auto-extscan for this address
+            if (auto_extscan_count < AUTO_EXTSCAN_QUEUE_SIZE) {
+                auto_extscan_queue[auto_extscan_count].slave_addr = scan_addr;
+                auto_extscan_queue[auto_extscan_count].reg_start = 0;
+                auto_extscan_queue[auto_extscan_count].reg_end = 100;
+                auto_extscan_count++;
             }
         }
     }
@@ -1095,7 +1136,108 @@ void loop()
     // ── Extended slave scan (register/coil/DI discovery) ──
     if (scan_slave_extended_active() && !modbus_is_paused())
     {
-        scan_slave_extended_step();
+        bool done = scan_slave_extended_step();
+        if (done && !scan_slave_extended_active())
+        {
+            // Extscan just completed — auto-adopt if this was an auto-triggered scan
+            const SlaveScanResult &result = scan_slave_extended_results();
+            if (result.reg_count > 0 && (auto_extscan_active || cfg.mb_profile == MB_PROFILE_GENERIC))
+            {
+                // Auto-adopt: same logic as handleApiMbExtScanAdopt()
+                uint8_t slave = result.slave_addr;
+                uint8_t added = 0;
+                for (uint8_t i = 0; i < result.reg_count && register_count < MAX_REGISTERS; i++)
+                {
+                    const RegScanEntry &se = result.regs[i];
+                    // Duplicate check
+                    bool dup = false;
+                    for (uint8_t j = 0; j < register_count; j++)
+                    {
+                        if (registers[j].slave_addr == slave && registers[j].addr == se.addr)
+                        { dup = true; break; }
+                    }
+                    if (dup) continue;
+
+                    RegisterConfig &r = registers[register_count];
+                    memset(&r, 0, sizeof(RegisterConfig));
+                    r.addr = se.addr;
+                    r.reg_type = REG_HOLDING;
+                    r.ha_class = HAC_SENSOR;
+                    r.slave_addr = slave;
+                    r.scale = 1;
+                    r.writable = se.writable;
+                    r.enabled = true;
+                    r.last_value = se.value;
+                    r.published = false;
+                    r.last_read_ms = 0;
+                    snprintf(r.name, sizeof(r.name), "S%u_R0x%04X", slave, se.addr);
+                    r.unit[0] = '\0';
+                    register_count++;
+                    added++;
+
+                    // Publish HA discovery immediately
+                    if (mqtt_is_connected())
+                        mqtt_publish_register_discovery(&registers[register_count - 1]);
+                    esp_task_wdt_reset();
+                    yield();
+                }
+                if (added > 0)
+                {
+                    config_save_registers();
+                    LOG_I("[AUTO-ADOPT] Slave %u: %u registers auto-added (total: %u/%u)\n",
+                          slave, added, register_count, MAX_REGISTERS);
+                }
+            }
+
+            // If auto-extscan was active, process next in queue
+            if (auto_extscan_active)
+            {
+                auto_extscan_idx++;
+                if (auto_extscan_idx < auto_extscan_count)
+                {
+                    AutoExtScanEntry &next = auto_extscan_queue[auto_extscan_idx];
+                    LOG_I("[AUTO-EXTSCAN] Next: slave=%u regs=%u-%u\n",
+                          next.slave_addr, next.reg_start, next.reg_end);
+                    scan_slave_extended(next.slave_addr, next.reg_start, next.reg_end);
+                    // Stay active — loop will keep stepping
+                }
+                else
+                {
+                    LOG_I("[AUTO-EXTSCAN] Queue complete: %u devices scanned\n", auto_extscan_count);
+                    auto_extscan_active = false;
+                    auto_extscan_count = 0;
+                    auto_extscan_idx = 0;
+                }
+            }
+        }
+    }
+    else if (auto_extscan_active && !scan_slave_extended_active())
+    {
+        // Auto-extscan queue has entries but no scan running — start next
+        if (auto_extscan_idx < auto_extscan_count)
+        {
+            AutoExtScanEntry &next = auto_extscan_queue[auto_extscan_idx];
+            LOG_I("[AUTO-EXTSCAN] Starting: slave=%u regs=%u-%u\n",
+                  next.slave_addr, next.reg_start, next.reg_end);
+            scan_slave_extended(next.slave_addr, next.reg_start, next.reg_end);
+        }
+        else
+        {
+            LOG_I("[AUTO-EXTSCAN] Queue complete: %u devices scanned\n", auto_extscan_count);
+            auto_extscan_active = false;
+            auto_extscan_count = 0;
+            auto_extscan_idx = 0;
+        }
+    }
+
+    // ── Normal scan completion: trigger auto-extscan queue if any ──
+    if (scanning_done && !scan_slave_extended_active() && !auto_extscan_active && auto_extscan_count > 0)
+    {
+        LOG_I("[AUTO-EXTSCAN] Starting queue: %u unknown devices\n", auto_extscan_count);
+        auto_extscan_active = true;
+        auto_extscan_idx = 0;
+        AutoExtScanEntry &first = auto_extscan_queue[0];
+        scan_slave_extended(first.slave_addr, first.reg_start, first.reg_end);
     }
 
     // ── Modbus polling ──────────────────────────────────────

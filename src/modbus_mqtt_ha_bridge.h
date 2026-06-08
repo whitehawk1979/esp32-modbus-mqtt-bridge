@@ -130,7 +130,7 @@
 #define MQTT_RECONNECT_MS 5000
 
 // ─── Firmware Version ────────────────────────────────────────
-#define FIRMWARE_VERSION "2.12.15" // ExtScan adopt: auto-register MQTT entities from scan results
+#define FIRMWARE_VERSION "2.12.16" // Auto-extscan + auto-adopt: unknown Modbus devices → MQTT entities
 
 // ─── TCP Modbus Bridge ─────────────────────────────────────────
 #define TCP_PORT 502
