@@ -46,7 +46,7 @@ static void cfg_defaults()
     // ── Modbus ──
     cfg.mb_baud = 9600;
     cfg.mb_scan_start = 1;
-    cfg.mb_scan_end = 247;
+    cfg.mb_scan_end = 30;
     cfg.mb_parity = 0;
     cfg.mb_profile = MB_PROFILE_KC868_HA;
     cfg.mb_reg_coil_start = 0;

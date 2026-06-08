@@ -86,7 +86,7 @@
 #define MODBUS_TIMEOUT_OFFLINE 500 // Offline/rescan: more patient
 #define MODBUS_POLL_MS 100
 #define MODBUS_SCAN_START 1
-#define MODBUS_SCAN_END 247   // Full Modbus address range
+#define MODBUS_SCAN_END 30    // Typical Modbus devices use low addresses (1-30)
 #define MODBUS_MAX_SLAVES 247 // Unlimited — up to full bus
 
 // ─── Module Fixed Configuration ─────────────────────────────────
@@ -130,7 +130,7 @@
 #define MQTT_RECONNECT_MS 5000
 
 // ─── Firmware Version ────────────────────────────────────────
-#define FIRMWARE_VERSION "2.12.10" // WDT reason logging, WiFi power save, API improvements
+#define FIRMWARE_VERSION "2.12.11" // WDT reason logging, WiFi power save, API improvements
 
 // ─── TCP Modbus Bridge ─────────────────────────────────────────
 #define TCP_PORT 502

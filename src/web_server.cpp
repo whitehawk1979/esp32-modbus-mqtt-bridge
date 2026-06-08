@@ -19,6 +19,7 @@
 #include <esp_task_wdt.h>
 #include "web_templates.h"
 #include "web_adapter.h"
+#include "modbus_scan.h"
 #ifdef USE_W5500
 #include <SPI.h>
 #include <Ethernet.h>
@@ -3413,6 +3414,95 @@ static void handleApiMbCoilWrite()
     WS->send(ok ? 200 : 500, "application/json", payload);
 }
 
+// ── Extended Scan API ──────────────────────────────────────
+// POST /api/mb/extscan?slave=1&reg_start=0&reg_end=100
+static void handleApiMbExtScan()
+{
+    if (!web_auth_ok()) return;
+    if (modbus_is_paused()) {
+        WS->send(503, "application/json", "{\"ok\":false,\"error\":\"bus_paused\"}");
+        return;
+    }
+    if (scan_slave_extended_active()) {
+        WS->send(409, "application/json", "{\"ok\":false,\"error\":\"scan_in_progress\"}");
+        return;
+    }
+
+    uint8_t slave = (uint8_t)WS->arg("slave").toInt();
+    uint16_t reg_start = (uint16_t)WS->arg("reg_start").toInt();
+    uint16_t reg_end = (uint16_t)WS->arg("reg_end").toInt();
+
+    if (slave < 1 || slave > 247) {
+        WS->send(400, "application/json", "{\"ok\":false,\"error\":\"invalid_slave\"}");
+        return;
+    }
+    if (reg_end == 0) reg_end = 100;
+    if (reg_end > 65535) reg_end = 65535;
+    if (reg_start > reg_end) reg_start = 0;
+
+    scan_slave_extended(slave, reg_start, reg_end);
+
+    JsonDocument doc;
+    doc["ok"] = true;
+    doc["slave"] = slave;
+    doc["reg_start"] = reg_start;
+    doc["reg_end"] = reg_end;
+    doc["status"] = "scanning";
+
+    String payload;
+    serializeJson(doc, payload);
+    WS->send(202, "application/json", payload);
+}
+
+// GET /api/mb/extscan/result
+static void handleApiMbExtScanResult()
+{
+    if (!web_auth_ok()) return;
+
+    const SlaveScanResult &result = scan_slave_extended_results();
+    JsonDocument doc(PsramAllocator::instance());
+
+    doc["active"] = scan_slave_extended_active();
+    doc["slave"] = result.slave_addr;
+    doc["identified"] = result.identified;
+    if (result.identified) {
+        doc["model_name"] = result.model_name;
+        doc["model_id"] = result.model_id;
+        doc["firmware_ver"] = result.firmware_ver;
+        doc["serial_number"] = result.serial_number;
+    }
+
+    // Register scan results
+    JsonArray regs = doc.createNestedArray("registers");
+    for (uint8_t i = 0; i < result.reg_count; i++) {
+        JsonObject r = regs.createNestedObject();
+        r["addr"] = result.regs[i].addr;
+        r["value"] = result.regs[i].value;
+        r["readable"] = result.regs[i].readable;
+        r["writable"] = result.regs[i].writable;
+    }
+
+    // Coil scan results
+    JsonArray coils = doc.createNestedArray("coil_groups");
+    for (uint8_t i = 0; i < result.coil_group_count; i++) {
+        JsonObject c = coils.createNestedObject();
+        c["start"] = result.coils[i].start_addr;
+        c["count"] = result.coils[i].count;
+    }
+
+    // DI scan results
+    JsonArray dis = doc.createNestedArray("di_groups");
+    for (uint8_t i = 0; i < result.di_group_count; i++) {
+        JsonObject d = dis.createNestedObject();
+        d["start"] = result.dis[i].start_addr;
+        d["count"] = result.dis[i].count;
+    }
+
+    String payload;
+    serializeJson(doc, payload);
+    WS->send(200, "application/json", payload);
+}
+
 #ifdef USE_WS2812
 // GET /api/led — current LED state
 static void handleApiLed()
@@ -4689,6 +4779,8 @@ void web_server_init()
     web.on("/api/mb/scan", HTTP_POST, handleApiMbScan);
     web.on("/api/mb/scan/result", HTTP_GET, handleApiMbScanResult);
     web.on("/api/mb/regscan", HTTP_GET, handleApiMbRegScan);
+    web.on("/api/mb/extscan", HTTP_POST, handleApiMbExtScan);
+    web.on("/api/mb/extscan/result", HTTP_GET, handleApiMbExtScanResult);
     web.on("/api/mb/coil", HTTP_POST, handleApiMbCoilWrite);
     web.begin();
     LOG_ILN("[WEB] Status & Config server started on port 80");
@@ -4780,6 +4872,8 @@ void web_server_init()
     ethWeb.on("/api/mb/scan", ETH_HTTP_POST, handleApiMbScan);
     ethWeb.on("/api/mb/scan/result", ETH_HTTP_GET, handleApiMbScanResult);
     ethWeb.on("/api/mb/regscan", ETH_HTTP_GET, handleApiMbRegScan);
+    ethWeb.on("/api/mb/extscan", ETH_HTTP_POST, handleApiMbExtScan);
+    ethWeb.on("/api/mb/extscan/result", ETH_HTTP_GET, handleApiMbExtScanResult);
     ethWeb.on("/api/mb/coil", ETH_HTTP_POST, handleApiMbCoilWrite);
     ethWeb.on("/api/backup", ETH_HTTP_GET, handleApiBackup);
     ethWeb.on("/api/restore", ETH_HTTP_POST, handleApiRestore);

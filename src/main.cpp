@@ -17,6 +17,7 @@
 #include "nibe_profile.h"
 #include "kincony_profile.h"
 #include "sabiana_profile.h"
+#include "modbus_scan.h"
 #ifdef USE_STORAGE
 #include "ota_storage.h"
 #endif
@@ -358,13 +359,16 @@ void scan_modbus_start()
     scan_addr = cfg.mb_scan_start;
     scan_active = true;
     module_count = 0;
-    modbus_set_timeout(200); // Fast timeout during scan (200ms vs 2000ms)
+    // Progressive timeout: fast for common addresses (1-16), slightly longer for others
+    uint16_t scan_timeout = (scan_addr <= 16) ? 100 : 200;
+    modbus_set_timeout(scan_timeout);
     scan_result_count = 0;
     memset(scan_results, 0, sizeof(scan_results));
-    LOG_I("[SCAN] Starting scan %d-%d (profile=%d, timeout=200ms)...\n",
+    LOG_I("[SCAN] Starting scan %d-%d (profile=%d, timeout=%dms)...\n",
           cfg.mb_scan_start,
           cfg.mb_scan_end,
-          cfg.mb_profile);
+          cfg.mb_profile,
+          scan_timeout);
 }
 
 static bool scan_modbus_next()
@@ -440,6 +444,8 @@ static bool scan_modbus_next()
         }
     }
     scan_addr++;
+    // Progressive timeout: faster for common low addresses
+    modbus_set_timeout((scan_addr <= 16) ? 100 : 200);
     return false; // scan not yet complete
 }
 
@@ -1073,6 +1079,12 @@ void loop()
         {
             scan_modbus_next();
         }
+    }
+
+    // ── Extended slave scan (register/coil/DI discovery) ──
+    if (scan_slave_extended_active() && !modbus_is_paused())
+    {
+        scan_slave_extended_step();
     }
 
     // ── Modbus polling ──────────────────────────────────────
