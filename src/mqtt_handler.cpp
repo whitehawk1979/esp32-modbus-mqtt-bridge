@@ -1123,7 +1123,7 @@ void mqtt_publish_bridge_state()
     snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/wifi_reconnects", cfg.mqtt_prefix);
     {
         static char wrc_val[16];
-        snprintf(wrc_val, sizeof(wrc_val), "%u", mqtt_get_reconnects());
+        snprintf(wrc_val, sizeof(wrc_val), "%u", wifi_get_reconnects());
         mqtt_pub(topic_buf, wrc_val, false);
     }
 

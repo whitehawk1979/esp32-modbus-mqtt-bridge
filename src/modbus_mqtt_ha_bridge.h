@@ -130,7 +130,7 @@
 #define MQTT_RECONNECT_MS 5000
 
 // ─── Firmware Version ────────────────────────────────────────
-#define FIRMWARE_VERSION "2.12.13" // WDT reason logging, WiFi power save, API improvements
+#define FIRMWARE_VERSION "2.12.14" // WiFi reconnect counter, bugfix wifi_reconnects topic, status UI split
 
 // ─── TCP Modbus Bridge ─────────────────────────────────────────
 #define TCP_PORT 502
@@ -687,6 +687,8 @@ void wdt_notify_publish();
 void wdt_reboot(const char *reason);
 uint32_t wdt_get_reboots();
 uint32_t mqtt_get_reconnects();
+uint32_t wifi_get_reconnects();
+void wifi_reconnect_count();
 const char *wdt_get_last_reason();
 
 // ws_handler.cpp

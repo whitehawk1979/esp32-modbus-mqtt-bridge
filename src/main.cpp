@@ -37,6 +37,11 @@ bool net_connected = false;
 String active_ip = "0.0.0.0";
 static bool mqtt_needs_reinit = false;
 
+// ─── WiFi Reconnect Counter ──────────────────────────────────────
+static uint32_t wifi_reconnect_total = 0;
+uint32_t wifi_get_reconnects() { return wifi_reconnect_total; }
+void wifi_reconnect_count() { wifi_reconnect_total++; }
+
 // ─── Timings ───────────────────────────────────────────────────
 static uint32_t last_poll_ms = 0;
 static uint32_t last_mqtt_ms = 0;
@@ -232,6 +237,7 @@ static void wifi_maintain()
         {
             LOG_ILN("[WiFi] Reconnecting (LAN fallback)...");
             WiFi.reconnect();
+            wifi_reconnect_count();
             last_reconnect = millis();
         }
     }

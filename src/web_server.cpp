@@ -538,7 +538,7 @@ static void handleStatus()
     // LAN status
     bool lan_up = eth_is_connected();
     bool lan_on = eth_is_started();
-    html += "<div class=\"row\"><span class=\"key\">LAN</span><span class=\"val " + String(lan_up ? "on" : "off") +
+    html += "<div class=\"row\"><span class=\"key\">LAN</span><span id='st-lan-st' class=\"val " + String(lan_up ? "on" : "off") +
             "\">" +
             String(lan_up   ? "CSATLAKOZVA ✅"
                    : lan_on ? "Keresés... ⏳"
@@ -546,7 +546,7 @@ static void handleStatus()
             "</span></div>";
     if (lan_on)
     {
-        html += "<div class=\"row\"><span class=\"key\">LAN IP</span><span class=\"val\">" + eth_get_ip() +
+        html += "<div class=\"row\"><span class=\"key\">LAN IP</span><span id='st-lan-ip' class=\"val\">" + eth_get_ip() +
                 "</span></div>";
     }
     html += "<div class=\"row\"><span class=\"key\">LAN DHCP</span><span class=\"val\">" +
@@ -558,9 +558,9 @@ static void handleStatus()
             "\">" + String(wifi_up ? "CSATLAKOZVA ✅" : "LECSATLAKOZVA ❌") + "</span></div>";
     if (wifi_up)
     {
-        html += "<div class=\"row\"><span class=\"key\">WiFi IP</span><span class=\"val\">" +
+        html += "<div class=\"row\"><span class=\"key\">WiFi IP</span><span id='st-wifi-ip' class=\"val\">" +
                 WiFi.localIP().toString() + "</span></div>";
-        html += "<div class=\"row\"><span class=\"key\">RSSI</span><span class=\"val\">" + String(WiFi.RSSI()) +
+        html += "<div class=\"row\"><span class=\"key\">RSSI</span><span id='st-wifi-rssi' class=\"val\">" + String(WiFi.RSSI()) +
                 " dBm</span></div>";
     }
     html += "<div class=\"row\"><span class=\"key\">WiFi DHCP</span><span class=\"val\">" +
@@ -569,7 +569,7 @@ static void handleStatus()
             String(cfg.wifi_mode == 0 ? "AP+STA (mindig elérhető)" : "Csak STA") + "</span></div>";
 
     // Active interface indicator
-    html += "<div class=\"row\"><span class=\"key\">Aktív elsődleges</span><span class=\"val\" style=\"color:" +
+    html += "<div class=\"row\"><span class=\"key\">Aktív elsődleges</span><span id='st-iface' class=\"val\" style=\"color:" +
             ifColor(cfg.active_if) + "\">" + ifName(cfg.active_if) + "</span></div>";
 
     // AP status
@@ -594,7 +594,7 @@ static void handleStatus()
     // MQTT
     html += "<h2>&#128172; MQTT</h2><div class=\"card\">";
     bool mc = mqtt_is_connected();
-    html += "<div class=\"row\"><span class=\"key\">Állapot</span><span class=\"val " + String(mc ? "on" : "off") +
+    html += "<div class=\"row\"><span class=\"key\">Állapot</span><span id='st-mqtt' class=\"val " + String(mc ? "on" : "off") +
             "\">" + String(mc ? "CSATLAKOZVA ✅" : "NEM CSATLAKOZOTT ❌") + "</span></div>";
     html += "<div class=\"row\"><span class=\"key\">Broker</span><span class=\"val\">" + htmlEscape(cfg.mqtt_host) + ":" +
             String(cfg.mqtt_port) + "</span></div>";
@@ -605,8 +605,10 @@ static void handleStatus()
     html += "<div class=\"row\"><span class=\"key\">HA Discovery</span><span class=\"val " +
             String(cfg.ha_discovery ? "on" : "off") + "\">" + String(cfg.ha_discovery ? "BE ✅" : "KI ❌") +
             "</span></div>";
-    html += "<div class=\"row\"><span class=\"key\">Újrakapcsolódások</span><span class=\"val\">" +
+    html += "<div class=\"row\"><span class=\"key\">MQTT Újrakapcs.</span><span id='st-mqtt-rc' class=\"val\">" +
             String(mqtt_get_reconnects()) + "</span></div>";
+    html += "<div class=\"row\"><span class=\"key\">WiFi Újrakapcs.</span><span id='st-wifi-rc' class=\"val\">" +
+            String(wifi_get_reconnects()) + "</span></div>";
     html += "</div>";
 
     // Modbus modules
@@ -699,13 +701,15 @@ static void handleStatus()
     html += "<h2>&#9881; Rendszer</h2><div class=\"card\">";
     html += "<div class=\"row\"><span class=\"key\">Hostname</span><span class=\"val\">" + String(cfg.hostname) +
             "</span></div>";
-    html += "<div class=\"row\"><span class=\"key\">Firmware</span><span class=\"val\">v" + String(FIRMWARE_VERSION) +
+    html += "<div class=\"row\"><span class=\"key\">Firmware</span><span id='st-fw' class=\"val\">v" + String(FIRMWARE_VERSION) +
             "</span></div>";
-    html += "<div class=\"row\"><span class=\"key\">Uptime</span><span class=\"val\">" + uptimeStr() + "</span></div>";
-    html += "<div class=\"row\"><span class=\"key\">Heap free</span><span class=\"val\">" +
+    html += "<div class=\"row\"><span class=\"key\">Uptime</span><span id='st-uptime' class=\"val\">" + uptimeStr() + "</span></div>";
+    html += "<div class=\"row\"><span class=\"key\">Heap free</span><span id='st-heap' class=\"val\">" +
             String(ESP.getFreeHeap() / 1024) + " KB</span></div>";
-    html += "<div class=\"row\"><span class=\"key\">WDT reboots</span><span class=\"val\">" +
+    html += "<div class=\"row\"><span class=\"key\">WDT reboots</span><span id='st-wdt' class=\"val\">" +
             String(wdt_get_reboots()) + "</span></div>";
+    html += "<div class=\"row\"><span class=\"key\">PSRAM free</span><span id='st-psram' class=\"val\">" +
+            String(psram_free() / 1024) + " KB</span></div>";
     // Bridge system sensors
     {
         bool wifi_connected = (WiFi.status() == WL_CONNECTED);
@@ -761,7 +765,7 @@ static void handleStatus()
             "20px;border-radius:6px;text-decoration:none;display:inline-block\" onclick=\"return confirm('Biztosan "
             "újraindítod az eszközt?')\">&#128260; Újraindítás</a></div>";
 
-    html += pageFoot();
+    html += pageFootAutoRefresh(5);
 
     WS->send(200, "text/html", html);
 }
@@ -2017,6 +2021,7 @@ static void handleApiStatus()
     doc["mqtt_transport"] = mqtt_is_on_lan() ? "LAN" : "WiFi";
     doc["mqtt_tls"] = cfg.mqtt_tls;
     doc["mqtt_reconnects"] = mqtt_get_reconnects();
+    doc["wifi_reconnects"] = wifi_get_reconnects();
     // TCP bridge status
     doc["tcp_enabled"] = cfg.tcp_enabled;
     if (cfg.tcp_enabled)
@@ -3777,6 +3782,9 @@ static void handleScan()
     html += F("if(h){var er=document.getElementById('extResult');er.innerHTML=h;er.style.display='block'}");
     html += F("if(d.active)setTimeout(pollExtScan,1000)");
     html += F("})}");
+
+    // Auto-load last scan result on page load (reuse pollExtScan renderer)
+    html += F("window.addEventListener('load',function(){pollExtScan()});");
 
     html += F("</script>");
 

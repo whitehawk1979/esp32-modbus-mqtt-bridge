@@ -302,6 +302,7 @@ void eth_loop()
         {
             LOG_ILN("[LAN] WiFi disrupted by SPI init — reconnecting...");
             WiFi.reconnect();
+            wifi_reconnect_count();
         }
 #endif
     }

@@ -395,4 +395,51 @@ static String pageFoot()
              "</body></html>");
 }
 
+// Page footer with auto-refresh (JS lightweight /api/status poll + DOM update)
+static String pageFootAutoRefresh(int intervalSec = 5)
+{
+    String s;
+    s.reserve(2048);
+    s += F("<p class='foot'>Modbus-MQTT HA Bridge &copy; 2025 — ESP32-S3-ETH (6DI+6R)</p>"
+           "</div><!-- /main -->"
+           "<script>"
+           "var _iv=setInterval(function(){"
+           "var x=new XMLHttpRequest();"
+           "x.onload=function(){"
+           "if(x.status!=200)return;"
+           "var d=JSON.parse(x.responseText);"
+           "var u=function(id,v){var e=document.getElementById(id);if(e)e.textContent=v;};"
+           "var uc=function(id,v,c){var e=document.getElementById(id);if(e){e.textContent=v;e.className='val '+c;}};"
+           "var di=function(id,c){var e=document.getElementById(id);if(e)e.style.display=c;};"
+           // Network
+           "u('st-iface',d.interface);"
+           "u('st-ip',d.ip);"
+           "u('st-wifi-ip',d.wifi_ip||'0.0.0.0');"
+           "u('st-wifi-rssi',d.wifi_rssi||0);"
+           "u('st-lan-ip',d.lan_ip||'0.0.0.0');"
+           "uc('st-lan-st',d.lan_connected?'CSATLAKOZVA ✅':'NEM ❌',d.lan_connected?'on':'off');"
+           // MQTT
+           "uc('st-mqtt',d.mqtt_connected?'CSATLAKOZVA ✅':'NEM CSATLAKOZOTT ❌',d.mqtt_connected?'on':'off');"
+           "u('st-mqtt-tr',d.mqtt_transport);"
+           "u('st-mqtt-rc',d.mqtt_reconnects||0);"
+           "u('st-wifi-rc',d.wifi_reconnects||0);"
+           // System
+           "u('st-uptime',d.uptime_s);"
+           "u('st-heap',d.heap_free_kb);"
+           "u('st-wdt',d.wdt_reboots);"
+           "u('st-psram',d.psram_free?Math.round(d.psram_free/1024)+' KB':'—');"
+           "u('st-fw',d.firmware);"
+           "};"
+           "x.open('GET','/api/status");
+    // Append auth parameter if present
+    s += F("'+(location.search?'\\?'+location.search.substr(1):''),true);"
+           "x.send();"
+           "},");
+    s += String(intervalSec * 1000);
+    s += F(");"
+           "</script>"
+           "</body></html>");
+    return s;
+}
+
 #endif // WEB_TEMPLATES_H
