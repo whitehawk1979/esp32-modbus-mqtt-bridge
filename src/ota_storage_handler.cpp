@@ -149,6 +149,9 @@ void handleOtaStoragePage()
 
     // ── JavaScript ──
     html += F("<script>"
+              "var wifiIP='");
+    html += WiFi.localIP().toString();
+    html += F("';"
               "function onFileSelect(){"
               "var f=document.getElementById('fwFile').files[0];"
               "document.getElementById('uploadBtn').disabled=!f;"
@@ -177,6 +180,11 @@ void handleOtaStoragePage()
               "s.innerHTML='&#10004; Firmware feltöltve a tárhelyre! Kattints az Alkalmazás gombra.';"
               "s.style.display='block';"
               "setTimeout(function(){location.reload()},2000);"
+              "}else if(xhr.status==501){"
+              "s.className='status-err';"
+              "s.innerHTML='&#10008; A feltöltés LAN-on nem támogatott. <a href=\"http://' + wifiIP + '/ota\">Használd a WiFicímet</a> a feltöltéshez.';"
+              "s.style.display='block';"
+              "document.getElementById('uploadBtn').disabled=false;"
               "}else{"
               "s.className='status-err';"
               "s.innerHTML='&#10008; Hiba: '+xhr.responseText;"
@@ -245,13 +253,20 @@ void handleOtaStorageUpload()
     if (!web_auth_ok())
         return;
 
-    if (!storage_mounted())
+    // Upload not supported on LAN (EthWebServer has no multipart parser)
+    if (!WS->isUploadSupported())
     {
-        web.send(500, "text/plain", "Storage not mounted!");
+        WS->send(501, "application/json", "{\"ok\":false,\"error\":\"upload_requires_wifi\"}");
         return;
     }
 
-    HTTPUpload &upload = web.upload();
+    if (!storage_mounted())
+    {
+        WS->send(500, "text/plain", "Storage not mounted!");
+        return;
+    }
+
+    HTTPUpload &upload = WS->upload();
 
     if (upload.status == UPLOAD_FILE_START)
     {
@@ -261,7 +276,7 @@ void handleOtaStorageUpload()
         if (upload.totalSize > 0 && upload.totalSize > OTA_MAX_SIZE)
         {
             LOG_ELN("[OTA-STORAGE] File too large!");
-            web.send(500, "text/plain", "A firmware túl nagy! Max 3 MB.");
+            WS->send(500, "text/plain", "A firmware túl nagy! Max 3 MB.");
             ota_upload_active = false;
             return;
         }
@@ -284,7 +299,7 @@ void handleOtaStorageUpload()
         if (!f)
         {
             LOG_ELN("[OTA-STORAGE] Failed to open file for writing!");
-            web.send(500, "text/plain", "Nem sikerült megnyitni a fájlt írásra!");
+            WS->send(500, "text/plain", "Nem sikerült megnyitni a fájlt írásra!");
             ota_upload_active = false;
             return;
         }
@@ -295,7 +310,7 @@ void handleOtaStorageUpload()
         if (written != upload.currentSize)
         {
             LOG_E("[OTA-STORAGE] Write error: %d / %d\n", written, upload.currentSize);
-            web.send(500, "text/plain", "Írási hiba a tárhelyre!");
+            WS->send(500, "text/plain", "Írási hiba a tárhelyre!");
             ota_upload_active = false;
             return;
         }
@@ -315,7 +330,7 @@ void handleOtaStorageUpload()
     {
         LOG_I("[OTA-STORAGE] Upload complete: %d bytes\n", ota_upload_size);
         ota_upload_active = false;
-        web.send(200, "text/plain", String("OK:") + String(ota_upload_size));
+        WS->send(200, "text/plain", String("OK:") + String(ota_upload_size));
     }
     else if (upload.status == UPLOAD_FILE_ABORTED)
     {
@@ -324,7 +339,7 @@ void handleOtaStorageUpload()
         // Clean up partial file
         if (LittleFS.exists(OTA_STORAGE_PATH))
             LittleFS.remove(OTA_STORAGE_PATH);
-        web.send(500, "text/plain", "Feltöltés megszakítva!");
+        WS->send(500, "text/plain", "Feltöltés megszakítva!");
     }
 }
 

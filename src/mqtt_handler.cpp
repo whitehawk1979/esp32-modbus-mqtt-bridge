@@ -29,6 +29,10 @@ static void mqtt_callback(char *topic, byte *payload, unsigned int length);
 // Track which transport MQTT is using (for logging + reconnect switching)
 static bool mqtt_on_lan = false;
 
+// ─── MQTT reconnect counter (for HA sensor) ──────────────────────
+static uint32_t mqtt_reconnect_total = 0;
+uint32_t mqtt_get_reconnects() { return mqtt_reconnect_total; }
+
 // ─── Safe MQTT publish — skips and logs if not connected ────────
 static bool mqtt_pub(const char *topic, const char *payload, bool retained = false)
 {
@@ -315,6 +319,7 @@ void mqtt_loop()
             {
                 LOG_ILN("[MQTT] Reconnected");
                 reconnect_attempts = 0; // Reset backoff on success
+                mqtt_reconnect_total++;
                 // Birth message on reconnect
                 mqtt_pub(topic_base(0, "status"), "online", true);
                 // Ensure HA MQTT integration processes discovery topics
@@ -441,6 +446,12 @@ static void mqtt_callback(char *topic, byte *payload, unsigned int length)
                             registers[i].last_value = value;
                             registers[i].published = true;
                             mqtt_publish_register_value(&registers[i]);
+                        }
+                        else
+                        {
+                            // Write failed — republish current value so HA reverts
+                            mqtt_publish_register_value(&registers[i]);
+                            LOG_E("[MQTT] Write failed: S%d R%04X, reverting state\n", slave, addr);
                         }
                         return; // Handled
                     }
@@ -1005,7 +1016,22 @@ void mqtt_publish_bridge_discovery()
         discovery_publish(discovery_topic("sensor", uid), doc);
     }
 
-    LOG_ILN("[MQTT] Bridge system discovery published (7 sensors)");
+    // 8. WDT Reboots
+    snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/wdt_reboots", cfg.mqtt_prefix);
+    publish_sensor("WDT Újraindítás", "wdt_reboots", topic_buf, nullptr, nullptr, "mdi:restart-alert");
+
+    // 9. WiFi Reconnects
+    snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/wifi_reconnects", cfg.mqtt_prefix);
+    publish_sensor("WiFi Újrakapcs.", "wifi_reconnects", topic_buf, nullptr, nullptr, "mdi:wifi-off");
+
+    // 10. TCP Bridge Requests (if TCP enabled)
+    if (cfg.tcp_enabled)
+    {
+        snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/tcp_req_count", cfg.mqtt_prefix);
+        publish_sensor("TCP Kérések", "tcp_req", topic_buf, nullptr, nullptr, "mdi:lan-connect");
+    }
+
+    LOG_I("[MQTT] Bridge system discovery published (8-10 sensors)\n");
 }
 
 // ─── Bridge System State Publishing ────────────────────────────
@@ -1083,6 +1109,31 @@ void mqtt_publish_bridge_state()
         static char psram_val[16];
         snprintf(psram_val, sizeof(psram_val), "%u", psram_free());
         mqtt_pub(topic_buf, psram_val, false);
+    }
+
+    // WDT reboots
+    snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/wdt_reboots", cfg.mqtt_prefix);
+    {
+        static char wdt_val[16];
+        snprintf(wdt_val, sizeof(wdt_val), "%u", wdt_get_reboots());
+        mqtt_pub(topic_buf, wdt_val, false);
+    }
+
+    // WiFi reconnects
+    snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/wifi_reconnects", cfg.mqtt_prefix);
+    {
+        static char wrc_val[16];
+        snprintf(wrc_val, sizeof(wrc_val), "%u", mqtt_get_reconnects());
+        mqtt_pub(topic_buf, wrc_val, false);
+    }
+
+    // TCP bridge stats
+    if (cfg.tcp_enabled)
+    {
+        snprintf(topic_buf, sizeof(topic_buf), "%s/bridge/tcp_req_count", cfg.mqtt_prefix);
+        static char tcp_val[16];
+        snprintf(tcp_val, sizeof(tcp_val), "%u", tcp_get_req_count());
+        mqtt_pub(topic_buf, tcp_val, false);
     }
 
     // Notify watchdog that MQTT is alive

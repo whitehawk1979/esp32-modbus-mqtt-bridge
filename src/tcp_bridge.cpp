@@ -27,9 +27,19 @@
 #include <WiFiClient.h>
 #include "modbus_mqtt_ha_bridge.h"
 
+#ifdef USE_W5500
+#include <Ethernet.h>
+#include "EthWebServer.h" // for EthEthernetServer
+#endif
+
 // ─── TCP Server & Clients ──────────────────────────────────────
 static WiFiServer tcp_server(TCP_PORT);
 static WiFiClient tcp_clients[TCP_MAX_CLIENTS];
+
+#ifdef USE_W5500
+static EthEthernetServer eth_tcp_server(TCP_PORT);
+static EthernetClient eth_tcp_clients[TCP_MAX_CLIENTS];
+#endif
 
 // ─── MBAP Header (Modbus TCP) ──────────────────────────────────
 struct MBAP_Header
@@ -57,18 +67,23 @@ void tcp_init()
     }
 
     tcp_server.begin();
+#ifdef USE_W5500
+    eth_tcp_server.begin();
+    LOG_I("[TCP] Modbus TCP gateway started on port %d (WiFi+LAN, max %d clients each)\n", TCP_PORT, TCP_MAX_CLIENTS);
+#else
     LOG_I("[TCP] Modbus TCP gateway started on port %d (max %d clients)\n", TCP_PORT, TCP_MAX_CLIENTS);
+#endif
 }
 
 // ─── Send Modbus TCP Error Response ────────────────────────────
-static void send_tcp_error(WiFiClient &client, MBAP_Header &header, uint8_t func, uint8_t exc_code)
+static void send_tcp_error(Client &client, MBAP_Header &header, uint8_t func, uint8_t exc_code)
 {
     uint16_t tid = header.transaction_id;
-    client.write((char *)&tid, 2);
+    client.write((const uint8_t*)&tid, 2);
     uint16_t zero = 0;
-    client.write((char *)&zero, 2); // protocol_id
+    client.write((const uint8_t*)&zero, 2); // protocol_id
     uint16_t len = htons(3);        // unit_id + exception response
-    client.write((char *)&len, 2);
+    client.write((const uint8_t*)&len, 2);
     client.write(header.unit_id);
     uint8_t exc[] = {(uint8_t)(func | 0x80), exc_code};
     client.write(exc, 2);
@@ -76,7 +91,7 @@ static void send_tcp_error(WiFiClient &client, MBAP_Header &header, uint8_t func
 }
 
 // ─── Process TCP→RTU Frame via modbus_raw_request ──────────────
-static bool process_tcp_frame(WiFiClient &client)
+static bool process_tcp_frame(Client &client)
 {
     // Read MBAP header (7 bytes)
     if (client.available() < 7)
@@ -326,13 +341,13 @@ static bool process_tcp_frame(WiFiClient &client)
 
             // Send MBAP + response
             uint16_t tid = header.transaction_id;
-            client.write((char *)&tid, 2);
+            client.write((const uint8_t*)&tid, 2);
             uint16_t zero = 0;
-            client.write((char *)&zero, 2);
+            client.write((const uint8_t*)&zero, 2);
             uint16_t mbap_len = htons(resp_idx + 1);
-            client.write((char *)&mbap_len, 2);
+            client.write((const uint8_t*)&mbap_len, 2);
             client.write(header.unit_id);
-            client.write(reinterpret_cast<char *>(resp_buf), resp_idx);
+            client.write(reinterpret_cast<const uint8_t *>(resp_buf), resp_idx);
             return true;
         }
     }
@@ -422,11 +437,11 @@ static bool process_tcp_frame(WiFiClient &client)
                            (uint8_t)(quantity >> 8),
                            (uint8_t)(quantity & 0xFF)};
         uint16_t tid = header.transaction_id;
-        client.write((char *)&tid, 2);
+        client.write((const uint8_t*)&tid, 2);
         uint16_t zero = 0;
-        client.write((char *)&zero, 2);
+        client.write((const uint8_t*)&zero, 2);
         uint16_t resp_len = htons(sizeof(resp) + 1); // +1 for unit_id
-        client.write((char *)&resp_len, 2);
+        client.write((const uint8_t*)&resp_len, 2);
         client.write(header.unit_id);
         client.write(resp, sizeof(resp));
         LOG_D("[TCP] FC15 coils S%d addr=%d count=%d OK\n", slave_addr, start_addr, quantity);
@@ -557,15 +572,15 @@ static bool process_tcp_frame(WiFiClient &client)
 
     // MBAP header
     uint16_t tid = header.transaction_id;
-    client.write((char *)&tid, 2);
+    client.write((const uint8_t*)&tid, 2);
     uint16_t zero = 0;
-    client.write((char *)&zero, 2);          // protocol_id = 0
+    client.write((const uint8_t*)&zero, 2);          // protocol_id = 0
     uint16_t mbap_len = htons(resp_idx + 1); // +1 for unit_id
-    client.write((char *)&mbap_len, 2);
+    client.write((const uint8_t*)&mbap_len, 2);
     client.write(header.unit_id);
 
     // PDU
-    client.write(reinterpret_cast<char *>(resp_buf), resp_idx);
+    client.write(reinterpret_cast<const uint8_t *>(resp_buf), resp_idx);
 
     return true;
 }
@@ -576,7 +591,7 @@ void tcp_loop()
     if (!cfg.tcp_enabled)
         return;
 
-    // Accept new connections
+    // Accept new WiFi connections
     if (tcp_server.hasClient())
     {
         bool accepted = false;
@@ -585,7 +600,7 @@ void tcp_loop()
             if (!tcp_clients[i] || !tcp_clients[i].connected())
             {
                 tcp_clients[i] = tcp_server.accept();
-                LOG_I("[TCP] Client %d connected from %s\n", i, tcp_clients[i].remoteIP().toString().c_str());
+                LOG_I("[TCP-WiFi] Client %d connected from %s\n", i, tcp_clients[i].remoteIP().toString().c_str());
                 accepted = true;
                 break;
             }
@@ -594,9 +609,51 @@ void tcp_loop()
         {
             WiFiClient reject = tcp_server.accept();
             reject.stop();
-            LOG_ELN("[TCP] No free client slot, rejected connection");
+            LOG_ELN("[TCP-WiFi] No free client slot, rejected connection");
         }
     }
+
+#ifdef USE_W5500
+    // Accept new LAN (Ethernet) connections
+    {
+        EthernetClient newClient = eth_tcp_server.available();
+        if (newClient) // EthernetClient is bool-convertible
+        {
+            bool accepted = false;
+            for (uint8_t i = 0; i < TCP_MAX_CLIENTS; i++)
+            {
+                if (!eth_tcp_clients[i] || !eth_tcp_clients[i].connected())
+                {
+                    eth_tcp_clients[i] = newClient;
+                    LOG_I("[TCP-LAN] Client %d connected\n", i);
+                    accepted = true;
+                    break;
+                }
+            }
+            if (!accepted)
+            {
+                newClient.stop();
+                LOG_ELN("[TCP-LAN] No free client slot, rejected connection");
+            }
+        }
+    }
+
+    // Process LAN clients
+    for (uint8_t i = 0; i < TCP_MAX_CLIENTS; i++)
+    {
+        if (eth_tcp_clients[i] && eth_tcp_clients[i].connected())
+        {
+            if (eth_tcp_clients[i].available() >= 7)
+            {
+                process_tcp_frame(eth_tcp_clients[i]);
+            }
+        }
+        else if (eth_tcp_clients[i])
+        {
+            eth_tcp_clients[i].stop();
+        }
+    }
+#endif
 
     // Process each client
     for (uint8_t i = 0; i < TCP_MAX_CLIENTS; i++)

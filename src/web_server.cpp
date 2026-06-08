@@ -3603,6 +3603,18 @@ static void handleScan()
     html += F("</table></div>");
     html += F("</div>");
 
+    // ─── Extended Scan (async: FC43+FC03+FC01+FC02) ───
+    html += F("<div class=\"card\"><h2>&#127959; Extended Scan</h2>");
+    html += F("<p class='note'>Aszinkron eszközfelderítés: FC43 (ID) + FC03 (regiszterek) + FC01 (coil-ok) + FC02 (DI-k). Lépésenként fut, nem blokkol.</p>");
+    html += F("<div class=\"fm\"><label>Slave: <input id=\"extSlave\" type=\"number\" min=\"1\" max=\"247\" value=\"1\" style=\"width:70px\"></label>");
+    html += F("<label>Reg start: <input id=\"extRegStart\" type=\"number\" min=\"0\" max=\"65535\" value=\"0\" style=\"width:80px\"></label>");
+    html += F("<label>Reg end: <input id=\"extRegEnd\" type=\"number\" min=\"1\" max=\"65535\" value=\"100\" style=\"width:80px\"></label></div>");
+    html += F("<div class=\"fm\"><button onclick=\"startExtScan()\" id=\"btnExtScan\">&#9654; Extended Scan indítása</button>");
+    html += F("<button onclick=\"pollExtScan()\" style=\"margin-left:8px\">&#128260; Eredmény lekérdezése</button></div>");
+    html += F("<div id=\"extProgress\" style=\"margin-top:8px;color:#8b949e;font-size:13px\"></div>");
+    html += F("<div id=\"extResult\" style=\"margin-top:12px;display:none\"></div>");
+    html += F("</div>");
+
     // ─── Write Slave ID ───
     html += F("<div class=\"card\"><h2>&#9999; Slave ID írás (FC06)</h2>");
     html += F("<div class=\"fm\"><label>Jelenlegi cím: <input id=\"writeOldAddr\" type=\"number\" min=\"1\" max=\"247\" value=\"1\" style=\"width:70px\"></label>");
@@ -3680,6 +3692,35 @@ static void handleScan()
     html += F("document.getElementById('coilStatus').textContent='Írás...';");
     html += F("fetch('/api/mb/coil?slave='+sl+'&coil='+ca+'&state='+st+qa(),{method:'POST'}).then(r=>r.json()).then(d=>{");
     html += F("document.getElementById('coilStatus').textContent=d.ok?'&#10003; Coil írva!':'&#10060; Hiba: '+(d.error||'ismeretlen')");
+    html += F("})}");
+
+    // Extended scan
+    html += F("function startExtScan(){");
+    html += F("var sl=document.getElementById('extSlave').value;");
+    html += F("var rs=document.getElementById('extRegStart').value||0;");
+    html += F("var re=document.getElementById('extRegEnd').value||100;");
+    html += F("document.getElementById('extProgress').textContent='Extended scan indítása...';");
+    html += F("document.getElementById('btnExtScan').disabled=true;");
+    html += F("fetch('/api/mb/extscan?slave='+sl+'&reg_start='+rs+'&reg_end='+re+qa(),{method:'POST'}).then(r=>r.json()).then(d=>{");
+    html += F("if(d.ok){document.getElementById('extProgress').textContent='Folyamatban... (slave '+d.slave+')';setTimeout(pollExtScan,2000)}");
+    html += F("else{document.getElementById('extProgress').textContent='Hiba: '+(d.error||'ismeretlen');document.getElementById('btnExtScan').disabled=false}");
+    html += F("})}");
+    html += F("function pollExtScan(){");
+    html += F("fetch('/api/mb/extscan/result'+(_auth?'?auth='+_auth:'')).then(r=>r.json()).then(d=>{");
+    html += F("var p=document.getElementById('extProgress');");
+    html += F("p.textContent=d.active?'&#128260; Scanning... (slave '+d.slave+')':('&#10003; Kész — slave '+d.slave);");
+    html += F("if(!d.active)document.getElementById('btnExtScan').disabled=false;");
+    // Build result HTML
+    html += F("var h='';");
+    html += F("if(d.identified){h+='<div class=\"row\"><span class=\"key\">FC43 ID</span><span class=\"val on\">'+d.model_name+' (FW:'+d.firmware_ver+', SN:'+d.serial_number+')</span></div>'}");
+    html += F("if(d.registers&&d.registers.length>0){h+='<h3>Regiszterek ('+d.registers.length+')</h3><table style=\"width:100%;border-collapse:collapse;font-size:13px\">';");
+    html += F("h+='<tr style=\"color:#58a6ff;border-bottom:1px solid #30363d\"><th style=\"text-align:left;padding:4px 8px\">Cím</th><th>Érték</th><th>Hex</th><th>R/W</th></tr>';");
+    html += F("d.registers.forEach(function(r){h+='<tr style=\"border-bottom:1px solid #21262d\"><td style=\"padding:4px 8px\">'+r.addr+'</td><td>'+r.value+'</td><td style=\"color:#8b949e\">0x'+r.value.toString(16).toUpperCase()+'</td><td>'+(r.writable?'W':'R')+'</td></tr>'});");
+    html += F("h+='</table>'}");
+    html += F("if(d.coil_groups&&d.coil_groups.length>0){h+='<h3>Coil csoportok ('+d.coil_groups.length+')</h3>';d.coil_groups.forEach(function(c){h+='<div class=\"row\"><span class=\"key\">Coils @'+c.start+'</span><span class=\"val\">'+c.count+' db</span></div>'})}");
+    html += F("if(d.di_groups&&d.di_groups.length>0){h+='<h3>DI csoportok ('+d.di_groups.length+')</h3>';d.di_groups.forEach(function(g){h+='<div class=\"row\"><span class=\"key\">DIs @'+g.start+'</span><span class=\"val\">'+g.count+' db</span></div>'})}");
+    html += F("if(h){var er=document.getElementById('extResult');er.innerHTML=h;er.style.display='block'}");
+    html += F("if(d.active)setTimeout(pollExtScan,1000)");
     html += F("})}");
 
     html += F("</script>");
@@ -4805,7 +4846,7 @@ void web_server_init()
     ethWeb.on("/ota/apply", ETH_HTTP_POST, handleOtaStorageApply);   // Flash from storage (works on LAN)
     ethWeb.on("/ota/info", ETH_HTTP_GET, handleOtaStorageInfo);      // Stored firmware info
     ethWeb.on("/ota/cancel", ETH_HTTP_POST, handleOtaStorageCancel); // Delete stored firmware
-    // NOTE: /otastorageupload is WiFi-only (multipart upload not supported on LAN)
+    ethWeb.on("/otastorageupload", ETH_HTTP_POST, handleOtaStorageUpload); // 501 on LAN (no upload handler needed)
 #endif
     ethWeb.on("/save", ETH_HTTP_POST, handleSave);
     ethWeb.on("/savepins", ETH_HTTP_POST, handleSavePins);
