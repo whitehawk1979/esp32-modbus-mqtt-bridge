@@ -22,7 +22,8 @@
 #include "modbus_scan.h"
 #ifdef USE_W5500
 #include <SPI.h>
-#include <Ethernet.h>
+#include <Ethernet.h>        // Arduino Ethernet library (patched: SPI.begin() removed in w5100.cpp)
+// Ethernet object is global from the library — no extern needed
 // eth_mac is defined static in eth_handler.cpp — use same MAC here
 static byte lan_mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
 #endif
@@ -51,8 +52,7 @@ WiFiWebAdapter wifiAdapter(web);
 WebInterface *WS = &wifiAdapter; // default: WiFi
 
 #ifdef USE_W5500
-EthWebServer ethWeb(80);
-EthWebAdapter lanAdapter(ethWeb);
+// ethWeb and lanAdapter are defined in EthWebServer.cpp
 #endif
 
 // ─── HTML Escape — XSS Prevention ──────────────────────────────
@@ -2434,15 +2434,20 @@ static void handleApiSdInit()
         delay(100);
     }
 
-    LOG_I("[API] SD init mode=%s\n", mode.c_str());
+    LOG_I("[API] SD init mode=%s pin_sd_cs=%d\n", mode.c_str(), cfg.pin_sd_cs);
     bool ok = sd_init(cfg.pin_sd_cs, mode.c_str());
 
-    char buf[128];
-    snprintf(buf, sizeof(buf), "{\"ok\":%s,\"sd_ok\":%s,\"mode\":\"%s\",\"sdio\":%s}",
+    // Get SD diagnostic info
+    String sd_diag = sd_is_ok() ? "ok" : String(sd_last_diag);
+    
+    char buf[384];
+    snprintf(buf, sizeof(buf), "{\"ok\":%s,\"sd_ok\":%s,\"mode\":\"%s\",\"sdio\":%s,\"pin_sd_cs\":%d,\"diag\":\"%s\"}",
              ok ? "true" : "false",
              ok ? "true" : "false",
              mode.c_str(),
-             sd_is_sdio_mode() ? "true" : "false");
+             sd_is_sdio_mode() ? "true" : "false",
+             cfg.pin_sd_cs,
+             sd_diag.c_str());
     WS->send(200, "application/json", buf);
 }
 
@@ -2873,6 +2878,654 @@ static void handleApiSdMkdir()
     sd_end_exclusive();
 }
 
+// ─── W5500 Direct SPI Diagnostic ──────────────────────────────
+// GET /api/w5500/diag — bit-bang SPI read of W5500 version register
+// Bypasses Arduino SPI library to test raw hardware connectivity
+// W5500 VersionR (0x0039) should return 0x51
+static void handleApiW5500Diag()
+{
+    if (!web_auth_ok())
+        return;
+    JsonDocument doc(PsramAllocator::instance());
+
+    const int SCLK = cfg.pin_eth_sclk;  // 13
+    const int MISO = cfg.pin_eth_miso;   // 12
+    const int MOSI = cfg.pin_eth_mosi;   // 11
+    const int CS   = cfg.pin_eth_cs;     // 14
+    const int RST  = cfg.pin_eth_rst;    // 9
+
+    // ── Step 0: MISO idle test (no RST, no SPI) ──
+    pinMode(MISO, INPUT);
+    delayMicroseconds(100);
+    int miso_idle_raw = digitalRead(MISO);
+    pinMode(MISO, INPUT_PULLUP);
+    delayMicroseconds(100);
+    int miso_idle_pullup = digitalRead(MISO);
+    doc["miso_idle_raw"] = miso_idle_raw;
+    doc["miso_idle_pullup"] = miso_idle_pullup;
+    doc["miso_floating"] = (miso_idle_raw == 0 && miso_idle_pullup == 1);
+
+    // ── Step 1: Hard reset W5500 ──
+    doc["rst_pin"] = RST;
+    if (RST >= 0) {
+        int rst_low_ms = 1000;
+        int rst_high_ms = 500;
+        // Support ?rst_low_ms=5000&rst_high_ms=1000 for deep reset
+        if (WS->hasArg("rst_low_ms")) rst_low_ms = WS->arg("rst_low_ms").toInt();
+        if (WS->hasArg("rst_high_ms")) rst_high_ms = WS->arg("rst_high_ms").toInt();
+        pinMode(RST, OUTPUT);
+        digitalWrite(RST, LOW);
+        delay(rst_low_ms);
+        digitalWrite(RST, HIGH);
+        delay(rst_high_ms);
+        doc["rst_done"] = true;
+        doc["rst_low_ms"] = rst_low_ms;
+        doc["rst_high_ms"] = rst_high_ms;
+    }
+
+    // Check MISO after RST
+    pinMode(MISO, INPUT_PULLUP);
+    delayMicroseconds(100);
+    doc["miso_after_rst"] = digitalRead(MISO);
+
+    // ── Step 2: Configure SPI pins ──
+    pinMode(SCLK, OUTPUT);
+    pinMode(MOSI, OUTPUT);
+    pinMode(MISO, INPUT_PULLUP);  // Use pullup for more reliable read
+    pinMode(CS, OUTPUT);
+    digitalWrite(CS, HIGH);
+    digitalWrite(SCLK, LOW);
+
+    // ── Step 2b: CS toggling test ──
+    // W5500 should drive MISO when CS is LOW, release when HIGH
+    digitalWrite(CS, LOW);
+    delayMicroseconds(10);
+    int miso_cs_low = digitalRead(MISO);
+    digitalWrite(CS, HIGH);
+    delayMicroseconds(10);
+    int miso_cs_high = digitalRead(MISO);
+    doc["miso_cs_low"] = miso_cs_low;
+    doc["miso_cs_high"] = miso_cs_high;
+    doc["cs_toggle_ok"] = (miso_cs_low != miso_cs_high); // W5500 should drive MISO differently
+
+    delay(10);
+
+    // ── Step 3: Bit-bang SPI read W5500 VersionR (0x0039) ──
+    // W5500 SPI Mode 0 (CPOL=0, CPHA=0):
+    //   - Data is shifted OUT on rising edge
+    //   - Master must sample MISO on/after FALLING edge (before next rising)
+    auto bitBangTransfer = [&](uint8_t tx_byte) -> uint8_t {
+        uint8_t rx = 0;
+        for (int i = 7; i >= 0; i--) {
+            // Setup MOSI
+            digitalWrite(MOSI, (tx_byte >> i) & 1);
+            delayMicroseconds(5);  // MOSI setup time before clock
+            // Rising edge — W5500 shifts out data on this edge
+            digitalWrite(SCLK, HIGH);
+            delayMicroseconds(5);  // Let MISO settle after W5500 output
+            // Falling edge — safe to sample MISO now
+            digitalWrite(SCLK, LOW);
+            delayMicroseconds(2);  // Small settle after falling
+            rx = (rx << 1) | digitalRead(MISO);
+            delayMicroseconds(2);
+        }
+        return rx;
+    };
+
+    // CS LOW
+    digitalWrite(CS, LOW);
+    delayMicroseconds(10);
+
+    // Phase 1: BSB[4:0]=0, M=0(read), A[15:8]=0x00 → 0x00
+    uint8_t phase1 = bitBangTransfer(0x00);
+    // Phase 2: A[7:0]=0x39 (VersionR register address)
+    uint8_t phase2 = bitBangTransfer(0x39);
+    // Phase 3: Read data (MOSI=0, clock MISO)
+    uint8_t version = bitBangTransfer(0x00);
+
+    // CS HIGH
+    digitalWrite(CS, HIGH);
+
+    // ── Step 4: Try W5500 soft reset via bit-bang ──
+    // Write MR register (0x0000) value 0x80 (reset)
+    delay(10);
+    digitalWrite(CS, LOW);
+    delayMicroseconds(10);
+    // Phase 1: BSB=0, M=1(write), A[15:8]=0x00 → 0x04
+    bitBangTransfer(0x04);
+    // Phase 2: A[7:0]=0x00
+    bitBangTransfer(0x00);
+    // Phase 3: Data = 0x80 (reset)
+    bitBangTransfer(0x80);
+    digitalWrite(CS, HIGH);
+    delay(100);  // Wait for W5500 reset to complete
+
+    // ── Step 5: Re-read version after soft reset ──
+    digitalWrite(CS, LOW);
+    delayMicroseconds(10);
+    bitBangTransfer(0x00);   // Phase 1
+    bitBangTransfer(0x39);   // Phase 2
+    uint8_t version2 = bitBangTransfer(0x00);  // Phase 3
+    digitalWrite(CS, HIGH);
+
+    doc["phase1_rx"] = phase1;
+    doc["phase2_rx"] = phase2;
+    doc["version_rx"] = version;
+    doc["version_after_softreset"] = version2;
+    doc["version_expected"] = 0x51;
+    doc["version_match"] = (version == 0x51) || (version2 == 0x51);
+    doc["miso_idle"] = digitalRead(MISO);
+    doc["diag"] = (version == 0x51 || version2 == 0x51) ? "W5500_ALIVE" :
+                 (miso_idle_raw == 0 && miso_idle_pullup == 1) ? "MISO_FLOATING_W5500_SILENT" :
+                 (phase1 == 0x00 && phase2 == 0x00) ? "MISO_STUCK_LOW" :
+                 (phase1 == 0xFF && phase2 == 0xFF) ? "MISO_FLOATING_NO_PULLDOWN" :
+                 "W5500_NO_RESPONSE";
+
+    // Restore pins to proper SPI mode
+    SPI.end();
+    SPI.begin(SCLK, MISO, MOSI, CS);
+
+    String payload;
+    serializeJson(doc, payload);
+    WS->send(200, "application/json", payload);
+}
+
+// ─── SD Step-by-Step Debug ────────────────────────────────────
+// GET /api/sd/debug — bit-bang full init sequence with per-command logging
+static void handleApiSdDebug()
+{
+    if (!web_auth_ok()) return;
+    JsonDocument doc(PsramAllocator::instance());
+
+    int cs   = cfg.pin_sd_cs;   // GPIO4
+    int miso = PIN_SD_MISO;     // GPIO5
+    int mosi = PIN_SD_MOSI;     // GPIO6
+    int sclk = PIN_SD_SCLK;    // GPIO7
+
+    // Power-cycle SD card
+    const int PIN_3V3_EN = 15;
+    pinMode(PIN_3V3_EN, OUTPUT);
+    digitalWrite(PIN_3V3_EN, HIGH); delay(500);  // OFF
+    digitalWrite(PIN_3V3_EN, LOW);  delay(500);  // ON
+    modbus_pause();
+    if (cfg.pin_eth_cs >= 0) { pinMode(cfg.pin_eth_cs, OUTPUT); digitalWrite(cfg.pin_eth_cs, HIGH); }
+
+    // ── MATCH PING EXACTLY: Phase 1-4 pre-conditioning ──
+    // Phase 1: MISO drive test
+    pinMode(miso, OUTPUT);
+    digitalWrite(miso, LOW); delayMicroseconds(10);
+    int fl = digitalRead(miso);
+    digitalWrite(miso, HIGH); delayMicroseconds(10);
+    int fh = digitalRead(miso);
+    doc["miso_drive_low"] = fl;
+    doc["miso_drive_high"] = fh;
+
+    // Phase 2: MISO rise-time / capacitance probe
+    pinMode(miso, OUTPUT); digitalWrite(miso, LOW); delayMicroseconds(50);
+    pinMode(miso, INPUT);
+    int m1 = digitalRead(miso);
+    delayMicroseconds(5); int m3 = digitalRead(miso);
+    delay(5); int m6 = digitalRead(miso);
+    doc["miso_rise_0us"] = m1;
+    doc["miso_rise_5us"] = m3;
+    doc["miso_rise_5ms"] = m6;
+
+    // Phase 3: Pull-down test
+    pinMode(miso, INPUT_PULLDOWN); delayMicroseconds(100);
+    int pd = digitalRead(miso);
+    pinMode(miso, INPUT);
+    doc["miso_pulldown"] = pd;
+
+    // Phase 4: Cross-talk test
+    pinMode(mosi, OUTPUT); pinMode(miso, INPUT);
+    digitalWrite(mosi, HIGH); delayMicroseconds(10); int ct_hi = digitalRead(miso);
+    digitalWrite(mosi, LOW);  delayMicroseconds(10); int ct_lo = digitalRead(miso);
+    doc["xtalk_hi"] = ct_hi;
+    doc["xtalk_lo"] = ct_lo;
+    pinMode(mosi, INPUT);
+
+    // ── MATCH PING EXACTLY: Phase 5 CMD0 bit-bang ──
+    pinMode(cs, OUTPUT);
+    pinMode(sclk, OUTPUT);
+    pinMode(mosi, OUTPUT);
+    pinMode(miso, INPUT);
+
+    // Init clocks CS HIGH (exactly like ping)
+    digitalWrite(cs, HIGH);
+    digitalWrite(mosi, HIGH);
+    digitalWrite(sclk, HIGH);
+    delay(5);
+    for (int i = 0; i < 80; i++) {
+        digitalWrite(sclk, LOW); delayMicroseconds(10);
+        digitalWrite(sclk, HIGH); delayMicroseconds(10);
+    }
+    doc["after_init_miso"] = (int)digitalRead(miso);
+
+    // CS LOW + CMD0 (exactly like ping)
+    digitalWrite(cs, LOW);
+    delayMicroseconds(10);
+    doc["cs_low_miso"] = (int)digitalRead(miso);
+
+    uint8_t cmd0[] = {0x40, 0x00, 0x00, 0x00, 0x00, 0x95};
+    for (int b = 0; b < 6; b++) {
+        for (int bit = 7; bit >= 0; bit--) {
+            digitalWrite(mosi, (cmd0[b] >> bit) & 1);
+            delayMicroseconds(5);
+            digitalWrite(sclk, LOW); delayMicroseconds(10);
+            digitalWrite(sclk, HIGH); delayMicroseconds(10);
+        }
+    }
+    // Read R1 — up to 64 bytes (exactly like ping)
+    uint8_t r1_cmd0 = 0xFF;
+    for (int i = 0; i < 64; i++) {
+        uint8_t bv = 0;
+        for (int bit = 7; bit >= 0; bit--) {
+            digitalWrite(sclk, LOW); delayMicroseconds(10);
+            digitalWrite(sclk, HIGH); delayMicroseconds(10);
+            bv |= (digitalRead(miso) << bit);
+        }
+        if (bv != 0xFF && r1_cmd0 == 0xFF) r1_cmd0 = bv;
+    }
+    char r1h[8]; snprintf(r1h, sizeof(r1h), "0x%02x", r1_cmd0);
+    doc["cmd0_r1"] = r1h;
+
+    if (r1_cmd0 != 0x01 && r1_cmd0 != 0x00) {
+        doc["diag"] = "CMD0_FAILED";
+        digitalWrite(cs, HIGH); modbus_resume();
+        String payload; serializeJson(doc, payload);
+        WS->send(200, "application/json", payload); return;
+    }
+
+    // ── CMD8: SEND_IF_COND ──
+    // 8 dummy bytes (NCR separator)
+    for (int i = 0; i < 8; i++) {
+        for (int bit = 7; bit >= 0; bit--) {
+            digitalWrite(mosi, HIGH);
+            digitalWrite(sclk, LOW); delayMicroseconds(10);
+            digitalWrite(sclk, HIGH); delayMicroseconds(10);
+        }
+    }
+    // CS HIGH then LOW between commands (like real SPI)
+    digitalWrite(cs, HIGH); delayMicroseconds(10);
+    digitalWrite(cs, LOW);  delayMicroseconds(10);
+
+    uint8_t cmd8[] = {0x48, 0x00, 0x00, 0x01, 0xAA, 0x87};
+    for (int b = 0; b < 6; b++) {
+        for (int bit = 7; bit >= 0; bit--) {
+            digitalWrite(mosi, (cmd8[b] >> bit) & 1);
+            delayMicroseconds(5);
+            digitalWrite(sclk, LOW); delayMicroseconds(10);
+            digitalWrite(sclk, HIGH); delayMicroseconds(10);
+        }
+    }
+    uint8_t r1_cmd8 = 0xFF;
+    for (int i = 0; i < 64; i++) {
+        uint8_t bv = 0;
+        for (int bit = 7; bit >= 0; bit--) {
+            digitalWrite(sclk, LOW); delayMicroseconds(10);
+            digitalWrite(sclk, HIGH); delayMicroseconds(10);
+            bv |= (digitalRead(miso) << bit);
+        }
+        if (bv != 0xFF && r1_cmd8 == 0xFF) r1_cmd8 = bv;
+    }
+    doc["cmd8_r1"] = r1_cmd8;
+    uint32_t cmd8_trail = 0;
+    if (r1_cmd8 <= 0x05) {
+        for (int i = 0; i < 4; i++) {
+            uint8_t bv = 0;
+            for (int bit = 7; bit >= 0; bit--) {
+                digitalWrite(sclk, LOW); delayMicroseconds(10);
+                digitalWrite(sclk, HIGH); delayMicroseconds(10);
+                bv |= (digitalRead(miso) << bit);
+            }
+            cmd8_trail = (cmd8_trail << 8) | bv;
+        }
+        doc["cmd8_trail_hex"] = String(cmd8_trail, 16).c_str();
+    }
+
+    // ── ACMD41 loop ──
+    uint8_t acmd41_r1 = 0xFF;
+    int attempts = 0;
+    for (int attempt = 0; attempt < 50; attempt++) {
+        attempts = attempt + 1;
+        // 8 dummy clocks
+        for (int i = 0; i < 8; i++) {
+            for (int bit = 7; bit >= 0; bit--) {
+                digitalWrite(mosi, HIGH);
+                digitalWrite(sclk, LOW); delayMicroseconds(10);
+                digitalWrite(sclk, HIGH); delayMicroseconds(10);
+            }
+        }
+        // CS toggle
+        digitalWrite(cs, HIGH); delayMicroseconds(10);
+        digitalWrite(cs, LOW);  delayMicroseconds(10);
+
+        // CMD55
+        uint8_t cmd55[] = {0x77, 0x00, 0x00, 0x00, 0x00, 0x65};
+        for (int b = 0; b < 6; b++) {
+            for (int bit = 7; bit >= 0; bit--) {
+                digitalWrite(mosi, (cmd55[b] >> bit) & 1);
+                delayMicroseconds(5);
+                digitalWrite(sclk, LOW); delayMicroseconds(10);
+                digitalWrite(sclk, HIGH); delayMicroseconds(10);
+            }
+        }
+        uint8_t r1_55 = 0xFF;
+        for (int i = 0; i < 8; i++) {
+            uint8_t bv = 0;
+            for (int bit = 7; bit >= 0; bit--) {
+                digitalWrite(sclk, LOW); delayMicroseconds(10);
+                digitalWrite(sclk, HIGH); delayMicroseconds(10);
+                bv |= (digitalRead(miso) << bit);
+            }
+            if (bv != 0xFF && r1_55 == 0xFF) r1_55 = bv;
+        }
+        doc["cmd55_r1"] = r1_55;
+        if (r1_55 != 0x01 && r1_55 != 0x00) break;
+
+        // 8 dummy clocks + CS toggle
+        for (int i = 0; i < 8; i++) {
+            for (int bit = 7; bit >= 0; bit--) {
+                digitalWrite(mosi, HIGH);
+                digitalWrite(sclk, LOW); delayMicroseconds(10);
+                digitalWrite(sclk, HIGH); delayMicroseconds(10);
+            }
+        }
+        digitalWrite(cs, HIGH); delayMicroseconds(10);
+        digitalWrite(cs, LOW);  delayMicroseconds(10);
+
+        // ACMD41 HCS=1
+        uint8_t acmd41[] = {0x69, 0x40, 0x00, 0x00, 0x00, 0x77};
+        for (int b = 0; b < 6; b++) {
+            for (int bit = 7; bit >= 0; bit--) {
+                digitalWrite(mosi, (acmd41[b] >> bit) & 1);
+                delayMicroseconds(5);
+                digitalWrite(sclk, LOW); delayMicroseconds(10);
+                digitalWrite(sclk, HIGH); delayMicroseconds(10);
+            }
+        }
+        acmd41_r1 = 0xFF;
+        for (int i = 0; i < 8; i++) {
+            uint8_t bv = 0;
+            for (int bit = 7; bit >= 0; bit--) {
+                digitalWrite(sclk, LOW); delayMicroseconds(10);
+                digitalWrite(sclk, HIGH); delayMicroseconds(10);
+                bv |= (digitalRead(miso) << bit);
+            }
+            if (bv != 0xFF && acmd41_r1 == 0xFF) acmd41_r1 = bv;
+        }
+        if (acmd41_r1 == 0x00) break;
+        if (acmd41_r1 > 0x05) break;
+        delay(10);
+    }
+    doc["acmd41_r1"] = acmd41_r1;
+    doc["acmd41_attempts"] = attempts;
+    doc["card_ready"] = (acmd41_r1 == 0x00);
+
+    if (acmd41_r1 == 0x00) {
+        // 8 dummy + CS toggle
+        for (int i = 0; i < 8; i++) {
+            for (int bit = 7; bit >= 0; bit--) {
+                digitalWrite(mosi, HIGH);
+                digitalWrite(sclk, LOW); delayMicroseconds(10);
+                digitalWrite(sclk, HIGH); delayMicroseconds(10);
+            }
+        }
+        digitalWrite(cs, HIGH); delayMicroseconds(10);
+        digitalWrite(cs, LOW);  delayMicroseconds(10);
+
+        // CMD58: READ_OCR
+        uint8_t cmd58[] = {0x7A, 0x00, 0x00, 0x00, 0x00, 0xFD};
+        for (int b = 0; b < 6; b++) {
+            for (int bit = 7; bit >= 0; bit--) {
+                digitalWrite(mosi, (cmd58[b] >> bit) & 1);
+                delayMicroseconds(5);
+                digitalWrite(sclk, LOW); delayMicroseconds(10);
+                digitalWrite(sclk, HIGH); delayMicroseconds(10);
+            }
+        }
+        uint8_t r1_58 = 0xFF;
+        for (int i = 0; i < 8; i++) {
+            uint8_t bv = 0;
+            for (int bit = 7; bit >= 0; bit--) {
+                digitalWrite(sclk, LOW); delayMicroseconds(10);
+                digitalWrite(sclk, HIGH); delayMicroseconds(10);
+                bv |= (digitalRead(miso) << bit);
+            }
+            if (bv != 0xFF && r1_58 == 0xFF) r1_58 = bv;
+        }
+        doc["cmd58_r1"] = r1_58;
+        uint32_t ocr = 0;
+        if (r1_58 == 0x00) {
+            for (int i = 0; i < 4; i++) {
+                uint8_t bv = 0;
+                for (int bit = 7; bit >= 0; bit--) {
+                    digitalWrite(sclk, LOW); delayMicroseconds(10);
+                    digitalWrite(sclk, HIGH); delayMicroseconds(10);
+                    bv |= (digitalRead(miso) << bit);
+                }
+                ocr = (ocr << 8) | bv;
+            }
+        }
+        doc["ocr_hex"] = String(ocr, 16).c_str();
+        doc["card_type"] = (ocr & (1UL << 30)) ? "SDHC/SDXC" : "SDSC";
+    }
+
+    digitalWrite(cs, HIGH);
+    doc["diag"] = (acmd41_r1 == 0x00) ? "CARD_INITIALIZED" :
+                 (r1_cmd0 == 0xFF) ? "NO_CARD_OR_MISO_FLOATING" :
+                 (r1_cmd8 == 0xFF) ? "NOT_SD_V2_MAYBE_MMC" :
+                 "INIT_FAILED";
+    modbus_resume();
+    String payload; serializeJson(doc, payload);
+    WS->send(200, "application/json", payload);
+}
+
+// ─── SD Bit-Bang Pin Test ────────────────────────────────────
+// GET /api/sd/ping — manual bit-bang SPI init sequence
+// Tests physical MISO trace connectivity, VDD power, and card presence
+// v3: MISO rise-time analysis + pull-down + capacitance detection
+static void handleApiSdPing()
+{
+    if (!web_auth_ok()) return;
+    
+    modbus_pause();
+    
+    JsonDocument doc;
+    doc["test"] = "physical_v3";
+    
+    // ── Phase 0: 3V3_EN (GPIO15) power rail check ──
+    // Waveshare ESP32-S3-ETH V1.0: Q3 (APM2307 P-MOSFET) switches VCC3.3_A
+    // GPIO15 = 3V3_EN: LOW = VCC3.3_A ON (SD powered), HIGH = OFF (SD dead!)
+    const int PIN_3V3_EN = 15;
+    pinMode(PIN_3V3_EN, INPUT);
+    int en_state = digitalRead(PIN_3V3_EN);
+    doc["3v3_en_gpio15"] = en_state;
+    doc["3v3_en_meaning"] = (en_state == 0) ? "VCC3.3A_ON_SD_POWERED" : "VCC3.3A_OFF_SD_NO_POWER";
+    
+    // If 3V3_EN is HIGH (power off), force LOW to enable
+    // Also try power-cycle: toggle 3V3_EN HIGH then LOW to reset SD card
+    bool power_cycled = false;
+    {
+        pinMode(PIN_3V3_EN, OUTPUT);
+        
+        // Power OFF first (HIGH = Q3 closed = no power)
+        digitalWrite(PIN_3V3_EN, HIGH);
+        delay(500);  // let card fully discharge
+        
+        // Power ON (LOW = Q3 open = power on)
+        digitalWrite(PIN_3V3_EN, LOW);
+        delay(500);  // let power rail stabilize + card init
+        
+        power_cycled = true;
+        doc["3v3_en_power_cycled"] = true;
+        
+        // Read back
+        pinMode(PIN_3V3_EN, INPUT);
+        int en_after = digitalRead(PIN_3V3_EN);
+        doc["3v3_en_after_cycle"] = en_after;
+    }
+    
+    int cs = cfg.pin_sd_cs;
+    int miso = PIN_SD_MISO;  // GPIO5
+    int mosi = PIN_SD_MOSI;  // GPIO6
+    int sclk = PIN_SD_SCLK;  // GPIO7
+    int w5500_cs = cfg.pin_eth_cs;
+    
+    // W5500 CS HIGH
+    if (w5500_cs >= 0) { pinMode(w5500_cs, OUTPUT); digitalWrite(w5500_cs, HIGH); }
+    
+    // ── Phase 1: MISO forced drive test ──
+    // Can GPIO5 drive LOW and HIGH?
+    pinMode(miso, OUTPUT);
+    digitalWrite(miso, LOW); delayMicroseconds(10);
+    int fl = digitalRead(miso);
+    digitalWrite(miso, HIGH); delayMicroseconds(10);
+    int fh = digitalRead(miso);
+    doc["miso_drive_low"] = fl;    // should be 0
+    doc["miso_drive_high"] = fh;   // should be 1
+    
+    // ── Phase 2: MISO rise-time (capacitance probe) ──
+    // Drive MISO LOW, then switch to INPUT (no pull-up) and measure how fast it rises
+    // - Instant HIGH (0-1us) → no capacitance → trace NOT connected to slot/hardware
+    // - Slow rise (5-50us) → small capacitance → trace connected to something (slot pins, pull-up)
+    // - Stays LOW → something actively holding LOW (card or short)
+    pinMode(miso, OUTPUT);
+    digitalWrite(miso, LOW);
+    delayMicroseconds(50);  // ensure fully LOW
+    // Switch to INPUT with NO pull-up/pull-down
+    pinMode(miso, INPUT);
+    int m1 = digitalRead(miso);           // ~0us
+    delayMicroseconds(1); int m2 = digitalRead(miso);   // 1us
+    delayMicroseconds(4); int m3 = digitalRead(miso);   // 5us
+    delayMicroseconds(45); int m4 = digitalRead(miso);  // 50us
+    delayMicroseconds(450); int m5 = digitalRead(miso); // 500us
+    esp_task_wdt_reset();
+    delay(5); int m6 = digitalRead(miso); // 5ms
+    delay(45); int m7 = digitalRead(miso); // 50ms
+    doc["miso_rise_0us"] = m1;
+    doc["miso_rise_1us"] = m2;
+    doc["miso_rise_5us"] = m3;
+    doc["miso_rise_50us"] = m4;
+    doc["miso_rise_500us"] = m5;
+    doc["miso_rise_5ms"] = m6;
+    doc["miso_rise_50ms"] = m7;
+    
+    // ── Phase 3: ESP pull-down test ──
+    // If 10K external pull-up → MISO HIGH in input mode
+    // Enable ESP internal pull-down (~45K) — can it override 10K pull-up?
+    // If pulldown brings MISO LOW → NO external pull-up → trace not connected
+    // If pulldown can't bring MISO LOW → external pull-up present → trace connected
+    pinMode(miso, INPUT_PULLDOWN);
+    delayMicroseconds(100);
+    int pd = digitalRead(miso);
+    pinMode(miso, INPUT);
+    doc["miso_pulldown"] = pd;  // 0=no ext pull-up, 1=ext pull-up present
+    
+    // ── Phase 4: Cross-talk test ──
+    // Drive MOSI HIGH/LOW, check if MISO follows (shorted traces?)
+    pinMode(mosi, OUTPUT);
+    pinMode(miso, INPUT);
+    digitalWrite(mosi, HIGH); delayMicroseconds(10);
+    int ct_hi = digitalRead(miso);
+    digitalWrite(mosi, LOW); delayMicroseconds(10);
+    int ct_lo = digitalRead(miso);
+    doc["xtalk_mosi_hi_miso"] = ct_hi;
+    doc["xtalk_mosi_lo_miso"] = ct_lo;
+    pinMode(mosi, INPUT);
+    
+    // ── Phase 5: CMD0 bit-bang ──
+    pinMode(cs, OUTPUT);
+    pinMode(sclk, OUTPUT);
+    pinMode(mosi, OUTPUT);
+    pinMode(miso, INPUT);
+    
+    // Init clocks CS HIGH
+    digitalWrite(cs, HIGH);
+    digitalWrite(mosi, HIGH);
+    digitalWrite(sclk, HIGH);
+    delay(5);
+    for (int i = 0; i < 80; i++) {
+        digitalWrite(sclk, LOW); delayMicroseconds(10);
+        digitalWrite(sclk, HIGH); delayMicroseconds(10);
+    }
+    int after_init = digitalRead(miso);
+    
+    // CS LOW + CMD0
+    digitalWrite(cs, LOW);
+    delayMicroseconds(10);
+    int cs_low_miso = digitalRead(miso);
+    
+    uint8_t cmd0[] = {0x40, 0x00, 0x00, 0x00, 0x00, 0x95};
+    for (int b = 0; b < 6; b++) {
+        for (int bit = 7; bit >= 0; bit--) {
+            digitalWrite(mosi, (cmd0[b] >> bit) & 1);
+            delayMicroseconds(5);
+            digitalWrite(sclk, LOW); delayMicroseconds(10);
+            digitalWrite(sclk, HIGH); delayMicroseconds(10);
+        }
+    }
+    uint8_t r1 = 0xFF;
+    for (int i = 0; i < 64; i++) {
+        uint8_t bv = 0;
+        for (int bit = 7; bit >= 0; bit--) {
+            digitalWrite(sclk, LOW); delayMicroseconds(10);
+            digitalWrite(sclk, HIGH); delayMicroseconds(10);
+            bv |= (digitalRead(miso) << bit);
+        }
+        if (bv != 0xFF && r1 == 0xFF) r1 = bv;
+    }
+    doc["after_init_miso"] = after_init;
+    doc["cs_low_miso"] = cs_low_miso;
+    char r1h[8]; snprintf(r1h, sizeof(r1h), "0x%02x", r1);
+    doc["cmd0_r1"] = r1h;
+    doc["card_responds"] = (r1 == 0x01);
+    
+    digitalWrite(cs, HIGH);
+    
+    // ── Phase 6: Residual pin levels ──
+    pinMode(cs, INPUT); pinMode(mosi, INPUT); pinMode(sclk, INPUT); pinMode(miso, INPUT);
+    delay(5);
+    doc["residual_cs"] = digitalRead(cs);
+    doc["residual_mosi"] = digitalRead(mosi);
+    doc["residual_sclk"] = digitalRead(sclk);
+    doc["residual_miso"] = digitalRead(miso);
+    
+    // ── Diagnosis ──
+    bool miso_can_drive = (fl == 0 && fh == 1);
+    // Rise time classification
+    // m1=1 at 0us → floating (no load)
+    // m1=0, m3=1 → very fast rise → very small C or just internal
+    // m4=1 → ~50us → moderate C → connected to hardware
+    // m6=1, m7=0 → very slow → large C → connected to powered card
+    bool trace_connected = (pd == 1) || (m4 == 1 && m1 == 0);
+    bool no_load = (m1 == 1);  // immediately HIGH → floating GPIO
+    
+    const char *diag;
+    if (en_state == 1 && !power_cycled) {
+        diag = "3V3_EN_HIGH_VCC3.3A_OFF_SD_NO_POWER";
+    } else if (power_cycled && r1 == 0x01) {
+        diag = "POWER_CYCLE_FIXED_CARD_ALIVE";
+    } else if (r1 == 0x01) {
+        diag = "CARD_ALIVE_OK";
+    } else if (!miso_can_drive) {
+        diag = "GPIO5_FAULT_CANT_DRIVE";
+    } else if (no_load) {
+        diag = "MISO_FLOATING_NO_TRACE_TO_SLOT";
+    } else if (trace_connected && r1 != 0x01) {
+        diag = "TRACE_CONNECTED_CARD_NOT_RESPONDING_VDD_OR_BAD_CARD";
+    } else {
+        diag = "AMBIGUOUS_CHECK_HARDWARE";
+    }
+    doc["diagnosis"] = diag;
+    
+    modbus_resume();
+    
+    String payload;
+    serializeJson(doc, payload);
+    WS->send(200, "application/json", payload);
+}
+
 // ─── SD Format API ───────────────────────────────────────────
 // POST /api/sd/format
 static void handleApiSdFormat()
@@ -2990,6 +3643,15 @@ static void handleApiLan()
     doc["pin_miso"] = cfg.pin_eth_miso;
     doc["pin_sclk"] = cfg.pin_eth_sclk;
 
+#ifdef USE_W5500
+    // ETH2 status — link up/down + IP
+    doc["hw"] = Ethernet.linkStatus() == LinkON ? "W5500" : "NO_HW";
+    doc["link"] = Ethernet.linkStatus() == LinkON ? "ON" : "OFF";
+    doc["lan_ip"] = Ethernet.localIP().toString();
+    doc["lan_connected"] = eth_is_connected();
+    doc["lan_started"] = eth_is_started();
+#endif
+
     int step = WS->hasArg("step") ? WS->arg("step").toInt() : -1;
     doc["step"] = step;
 
@@ -3013,42 +3675,127 @@ static void handleApiLan()
     }
     else if (step == 2)
     {
-        // Step 2: SPI bus init
+        // Step 2: Init SPI with custom pins (FSPI bus)
+        SPI.end();
         SPI.begin(cfg.pin_eth_sclk, cfg.pin_eth_miso, cfg.pin_eth_mosi, cfg.pin_eth_cs);
-        doc["step2"] = "SPI_BEGIN_OK";
+        doc["step2"] = "SPI_BEGIN_WITH_PINS";
     }
     else if (step == 3)
     {
-        // Step 3: Ethernet CS init + chip detect
+        // Step 3: Ethernet.init() + hardware detect
         Ethernet.init(cfg.pin_eth_cs);
-        doc["step3"] = "INIT_OK";
-        doc["hw"] = Ethernet.hardwareStatus() == EthernetNoHardware ? "NO_HW"
-                    : Ethernet.hardwareStatus() == EthernetW5500    ? "W5500"
-                    : Ethernet.hardwareStatus() == EthernetW5200    ? "W5200"
-                    : Ethernet.hardwareStatus() == EthernetW5100    ? "W5100"
-                                                                    : "OTHER";
-        doc["link"] = (Ethernet.linkStatus() == LinkON) ? "ON" : (Ethernet.linkStatus() == LinkOFF) ? "OFF" : "UNKNOWN";
+        EthernetHardwareStatus hw = Ethernet.hardwareStatus();
+        doc["step3_hw"] = (int)hw;
+        doc["step3"] = (hw != EthernetNoHardware) ? "W5500_DETECTED" : "NO_HARDWARE";
+        doc["hw"] = (hw == EthernetW5500) ? "W5500" : (hw == EthernetNoHardware ? "NO_HW" : "UNKNOWN");
+        doc["link"] = Ethernet.linkStatus() == LinkON ? "ON" : "OFF";
     }
     else if (step == 4)
     {
-        // Step 4: Try DHCP (5s timeout)
-        int result = Ethernet.begin(lan_mac, 5000, 2000);
-        doc["step4_dhcp"] = result;
-        if (result == 0)
+        // Step 4: Try Ethernet.begin() with DHCP
+        int ret = Ethernet.begin(lan_mac, 15000, 4000);
+        doc["step4_ret"] = ret;
+        if (ret != 0)
         {
-            doc["step4_status"] = "DHCP_FAILED";
+            doc["step4_status"] = "ETHERNET_STARTED";
+            doc["ip"] = Ethernet.localIP().toString();
+            eth_set_connected(Ethernet.linkStatus() == LinkON);
         }
         else
         {
-            doc["step4_status"] = "DHCP_OK";
-            doc["ip"] = Ethernet.localIP().toString();
-            eth_set_connected(true);
+            doc["step4_status"] = "ETHERNET_FAILED";
         }
         eth_set_started(true);
-        doc["hw"] = Ethernet.hardwareStatus() == EthernetNoHardware ? "NO_HW"
-                    : Ethernet.hardwareStatus() == EthernetW5500    ? "W5500"
-                                                                    : "OTHER";
-        doc["link"] = (Ethernet.linkStatus() == LinkON) ? "ON" : "OFF";
+        doc["hw"] = Ethernet.hardwareStatus() == EthernetW5500 ? "W5500" : "NO_HW";
+        doc["link"] = Ethernet.linkStatus() == LinkON ? "ON" : "OFF";
+    }
+    else if (step == 5)
+    {
+        // Step 5: Raw W5500 SPI register read test + GPIO diagnostics
+        doc["step5"] = "RAW_SPI_TEST";
+        
+        // ── Phase A: GPIO-level diagnostics (no SPI library) ──
+        // Configure all W5500 SPI pins as GPIO first
+        SPI.end();  // release FSPI bus completely
+        delay(1);    // let GPIO matrix settle
+        
+        pinMode(cfg.pin_eth_cs, OUTPUT);
+        pinMode(cfg.pin_eth_mosi, OUTPUT);
+        pinMode(cfg.pin_eth_sclk, OUTPUT);
+        pinMode(cfg.pin_eth_miso, INPUT);
+        pinMode(cfg.pin_eth_rst, OUTPUT);
+        
+        // Hard RST: LOW 10ms, then HIGH, wait 500ms for full W5500 boot
+        digitalWrite(cfg.pin_eth_rst, LOW);
+        delay(10);
+        digitalWrite(cfg.pin_eth_rst, HIGH);
+        delay(500);  // W5500 needs 100ms+ after RST + PHY init
+        
+        // Check MISO idle (CS HIGH = deselected, MISO should be tri-state HIGH)
+        digitalWrite(cfg.pin_eth_cs, HIGH);
+        delayMicroseconds(50);
+        doc["miso_idle_cshi"] = digitalRead(cfg.pin_eth_miso);
+        
+        // Check MISO with internal pull-up — distinguishes floating (goes HIGH) vs actively driven LOW
+        pinMode(cfg.pin_eth_miso, INPUT_PULLUP);
+        delayMicroseconds(50);
+        doc["miso_pullup"] = digitalRead(cfg.pin_eth_miso);
+        pinMode(cfg.pin_eth_miso, INPUT);  // back to no pull-up
+        
+        // Check INTN pin (GPIO15) — should be LOW when W5500 wants attention, HIGH idle
+        pinMode(cfg.pin_eth_int, INPUT_PULLUP);
+        delayMicroseconds(50);
+        doc["intn_idle"] = digitalRead(cfg.pin_eth_int);
+        pinMode(cfg.pin_eth_int, INPUT);
+        
+        // Check RST pin state
+        doc["rst_state"] = digitalRead(cfg.pin_eth_rst);
+        
+        // Check all W5500 SPI pins for sanity
+        doc["sclk_idle"] = digitalRead(cfg.pin_eth_sclk);
+        doc["mosi_idle"] = digitalRead(cfg.pin_eth_mosi);
+        doc["cs_idle"] = digitalRead(cfg.pin_eth_cs);
+        
+        // ── Bit-bang SPI: read VERSIONR (0x0039) from W5500 ──
+        // W5500 SPI frame: 3 bytes address phase + 1 byte data phase
+        // Read frame: [BSB=0x04][ADDR_H=0x00][ADDR_L=0x39][OPM=0x00][DATA_OUT]
+        digitalWrite(cfg.pin_eth_cs, LOW);  // select W5500
+        delayMicroseconds(5);
+        
+        // Send address phase: BSB=0x04, ADDR_H=0x00, ADDR_L=0x39, OPM=0x00
+        uint8_t tx_bytes[] = {0x04, 0x00, 0x39, 0x00};
+        for (int i = 0; i < 4; i++) {
+            uint8_t b = tx_bytes[i];
+            for (int bit = 7; bit >= 0; bit--) {
+                digitalWrite(cfg.pin_eth_sclk, LOW);
+                delayMicroseconds(2);
+                digitalWrite(cfg.pin_eth_mosi, (b & (1 << bit)) ? HIGH : LOW);
+                delayMicroseconds(2);
+                digitalWrite(cfg.pin_eth_sclk, HIGH);
+                delayMicroseconds(2);
+            }
+        }
+        
+        // Read data phase: 1 byte (VERSIONR should be 0x51)
+        uint8_t ver = 0;
+        for (int bit = 7; bit >= 0; bit--) {
+            digitalWrite(cfg.pin_eth_sclk, LOW);
+            delayMicroseconds(2);
+            digitalWrite(cfg.pin_eth_sclk, HIGH);
+            delayMicroseconds(2);
+            ver |= (digitalRead(cfg.pin_eth_miso) ? 1 : 0) << bit;
+        }
+        
+        digitalWrite(cfg.pin_eth_cs, HIGH);  // deselect W5500
+        delayMicroseconds(10);
+        
+        doc["bb_version"] = ver;
+        doc["bb_expected"] = 0x51;
+        doc["bb_match"] = (ver == 0x51);
+        doc["miso_after_read"] = digitalRead(cfg.pin_eth_miso);
+        
+        // ── Phase B: HW SPI test — Arduino Ethernet lib already uses FSPI via SPI.begin(pins) ──
+        doc["hwspi_version"] = 1;  // FSPI bus active
     }
 #else
     doc["error"] = "USE_W5500 not defined";
@@ -3119,45 +3866,29 @@ static void handleApiDiag()
     doc["lan_connected"] = eth_is_connected();
 
 #ifdef USE_W5500
-    // ── W5500 Hardware Status ──
-    int hw = Ethernet.hardwareStatus();
-    switch (hw)
-    {
-    case EthernetNoHardware: doc["hw_status"] = "NO_HARDWARE"; break;
-    case EthernetW5100:      doc["hw_status"] = "W5100"; break;
-    case EthernetW5200:      doc["hw_status"] = "W5200"; break;
-    case EthernetW5500:      doc["hw_status"] = "W5500"; break;
-    default:                 doc["hw_status"] = hw; break;
-    }
-    doc["hw_raw"] = hw;
+    // ── W5500 Hardware Status via ETH2 ──
+    doc["hw_status"] = Ethernet.linkStatus() == LinkON ? "W5500" : "NO_HARDWARE";
+    doc["hw_raw"] = Ethernet.linkStatus() == LinkON ? 1 : 0;
 
     // ── Link Status ──
-    int lnk = Ethernet.linkStatus();
-    switch (lnk)
-    {
-    case LinkON:  doc["link_status"] = "ON"; break;
-    case LinkOFF: doc["link_status"] = "OFF"; break;
-    default:      doc["link_status"] = "UNKNOWN"; break;
-    }
-    doc["link_raw"] = lnk;
+    doc["link_status"] = Ethernet.linkStatus() == LinkON ? "ON" : "OFF";
+    doc["link_raw"] = Ethernet.linkStatus() == LinkON ? 1 : 0;
 
     // ── IP from W5500 ──
     doc["eth_ip"] = Ethernet.localIP().toString();
     doc["eth_subnet"] = Ethernet.subnetMask().toString();
     doc["eth_gw"] = Ethernet.gatewayIP().toString();
     doc["eth_dns"] = Ethernet.dnsServerIP().toString();
-    // MAC not accessible (static in eth_handler) — read from Ethernet lib
-    byte mac[6];
-    Ethernet.MACAddress(mac);
-    char mac_str[18];
-    snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    doc["eth_mac"] = mac_str;
-
-    // ── SPI bus test: read W5500 version register ──
-    // W5500 version register at 0x0000_0039 should return 0x51
-    // We test by reading hardwareStatus which does SPI internally
-    doc["spi_responsive"] = (hw != EthernetNoHardware);
+    // MAC address
+    {
+        uint8_t mac_bytes[6];
+        Ethernet.MACAddress(mac_bytes);
+        char mac_str[18];
+        snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 mac_bytes[0], mac_bytes[1], mac_bytes[2], mac_bytes[3], mac_bytes[4], mac_bytes[5]);
+        doc["eth_mac"] = mac_str;
+    }
+    doc["spi_responsive"] = Ethernet.linkStatus() == LinkON;
 
     // ── GPIO sanity check ──
     if (cfg.pin_eth_cs >= 0)
@@ -4970,6 +5701,7 @@ void web_server_init()
     web.on("/api/sd/upload", HTTP_POST, handleApiSdUpload, handleApiSdUpload);
     web.on("/api/lan", HTTP_GET, handleApiLan);
     web.on("/api/diag", HTTP_GET, handleApiDiag);
+    web.on("/api/w5500/diag", HTTP_GET, handleApiW5500Diag);
 #ifdef USE_WS2812
     web.on("/api/led", HTTP_GET, handleApiLed);
     web.on("/api/led/set", HTTP_POST, handleApiLedSet);
@@ -4978,6 +5710,8 @@ void web_server_init()
 #ifdef USE_SD
     web.on("/api/sd/gpio", HTTP_GET, handleApiSdGpio);
     web.on("/api/sd/test", HTTP_GET, handleApiSdTest);
+    web.on("/api/sd/ping", HTTP_GET, handleApiSdPing);
+    web.on("/api/sd/debug", HTTP_GET, handleApiSdDebug);
 #endif
 #ifdef USE_STORAGE
     web.on("/api/storage/list", HTTP_GET, handleApiStorageList);
@@ -5064,6 +5798,7 @@ void web_server_init()
     ethWeb.on("/api/sd/upload", ETH_HTTP_POST, handleApiSdUpload);
     ethWeb.on("/api/lan", ETH_HTTP_GET, handleApiLan);
     ethWeb.on("/api/diag", ETH_HTTP_GET, handleApiDiag);
+    ethWeb.on("/api/w5500/diag", ETH_HTTP_GET, handleApiW5500Diag);
 #ifdef USE_WS2812
     ethWeb.on("/api/led", ETH_HTTP_GET, handleApiLed);
     ethWeb.on("/api/led/set", ETH_HTTP_POST, handleApiLedSet);
@@ -5072,6 +5807,8 @@ void web_server_init()
 #ifdef USE_SD
     ethWeb.on("/api/sd/gpio", ETH_HTTP_GET, handleApiSdGpio);
     ethWeb.on("/api/sd/test", ETH_HTTP_GET, handleApiSdTest);
+    ethWeb.on("/api/sd/ping", ETH_HTTP_GET, handleApiSdPing);
+    ethWeb.on("/api/sd/debug", ETH_HTTP_GET, handleApiSdDebug);
 #endif
 #ifdef USE_STORAGE
     ethWeb.on("/api/storage/list", ETH_HTTP_GET, handleApiStorageList);

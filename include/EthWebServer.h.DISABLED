@@ -1,5 +1,9 @@
 /**
- * EthWebServer.h — Minimal WebServer-compatible interface over EthernetServer (W5500)
+ * EthWebServer.h — Minimal WebServer-compatible interface over WiFiServer (W5500 via ETH2)
+ *
+ * The Arduino Ethernet library uses its own socket stack (not lwIP),
+ * WiFiClient/WiFiServer as the TCP interface — same as WiFi.
+ * No EthernetServer/EthernetClient needed!
  */
 
 #ifndef ETH_WEBSERVER_H
@@ -8,7 +12,7 @@
 #ifdef USE_W5500
 
 #include <Arduino.h>
-#include <Ethernet.h>
+#include <WiFi.h>
 #include <map>
 #include "modbus_mqtt_ha_bridge.h"
 
@@ -33,13 +37,17 @@ struct EthRoute
 
 #define ETH_MAX_ROUTES 80
 
-// ─── EthernetServer subclass with begin() override ───────────
-class EthEthernetServer : public EthernetServer
+// ─── WiFiServer wrapper for ETH2 LAN ─────────────────────────
+class EthEthernetServer
 {
 public:
-    explicit EthEthernetServer(uint16_t port) : EthernetServer(port) {}
-    void begin(uint16_t) override { EthernetServer::begin(); }
-    using EthernetServer::begin;
+    explicit EthEthernetServer(uint16_t port) : _server(port), _port(port) {}
+    void begin() { _server.begin(); }
+    WiFiClient available() { return _server.available(); }
+
+private:
+    WiFiServer _server;
+    uint16_t _port;
 };
 
 class EthWebServer
@@ -55,7 +63,7 @@ public:
 
     void handleClient()
     {
-        EthernetClient client = _server.available();
+        WiFiClient client = _server.available();
         if (!client) return;
 
         // Read request with timeout
@@ -190,7 +198,7 @@ public:
 
         if (client.connected())
             client.stop();
-        _client = EthernetClient();
+        _client = WiFiClient();
     }
 
     // ── Route registration ─────────────────────────────────
@@ -321,7 +329,7 @@ public:
     }
 
     // ── Client ────────────────────────────────────────────
-    EthernetClient &client() { return _client; }
+    WiFiClient &client() { return _client; }
 
     void redirect(const String &url)
     {
@@ -334,7 +342,7 @@ public:
 
 private:
     EthEthernetServer _server;
-    EthernetClient _client;
+    WiFiClient _client;
     uint16_t _port;
 
     EthRoute _routes[ETH_MAX_ROUTES];

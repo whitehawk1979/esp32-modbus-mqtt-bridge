@@ -160,7 +160,6 @@ public:
     Client &clientStream() override { return _server.client(); }
 
     // ─── Multipart upload — NOT supported on LAN ───────────────
-    // Returns a static dummy; callers must check isUploadSupported() first.
     HTTPUpload &upload() override { static HTTPUpload dummy; return dummy; }
     bool isUploadSupported() const override { return false; }
 
@@ -180,7 +179,7 @@ extern WebInterface *WS; // Active web server (WiFi or LAN)
 extern WiFiWebAdapter wifiAdapter;
 #ifdef USE_W5500
 extern EthWebAdapter lanAdapter;
-extern EthWebServer ethWeb;
+// ethWeb is declared extern in EthWebServer.h
 #endif
 
 #endif // WEB_ADAPTER_H

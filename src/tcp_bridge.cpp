@@ -28,8 +28,7 @@
 #include "modbus_mqtt_ha_bridge.h"
 
 #ifdef USE_W5500
-#include <Ethernet.h>
-#include "EthWebServer.h" // for EthEthernetServer
+#include "EthWebServer.h" // for EthEthernetServer (WiFiServer wrapper)
 #endif
 
 // ─── TCP Server & Clients ──────────────────────────────────────

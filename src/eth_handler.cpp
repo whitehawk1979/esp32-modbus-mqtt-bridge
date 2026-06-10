@@ -47,30 +47,45 @@ static String urlDecode(const String &s)
 // ─── State ─────────────────────────────────────────────────────
 static bool lan_connected = false;
 static bool lan_started = false;
+static bool w5500_reinit_giveup = false;
 static volatile bool w5500_task_done = false; // set by FreeRTOS task when init complete
 static volatile bool w5500_task_ok = false;   // true if DHCP/Static succeeded
 
 // ─── Built-in EMAC Support (LAN8720 / IP101) ──────────────────
+// Only include Arduino ETH.h for EMAC PHY (LAN8720/IP101) — NOT for W5500 SPI
+// W5500 uses Arduino Ethernet library (FSPI bus, same as v2.8.0)
+#ifndef USE_W5500
 #if __has_include(<ETH.h>)
 #include <ETH.h>
 #define HAS_EMAC
 #endif
+#endif
 
-// ─── W5500 Support (SPI Ethernet) ─────────────────────────────
-// Use USE_W5500 build flag instead of __has_include — lib_deps headers
-// may not be in __has_include search path even though they compile fine.
+// ─── W5500 Support (SPI Ethernet via Arduino Ethernet library) ──
+// Arduino Ethernet library uses W5100 class which talks directly to W5500
+// via SPI.beginTransaction() on the FSPI bus — same approach as v2.8.0 which worked!
+// NOTE: Do NOT use ETHClass2 (ESP-IDF ETH stack, SPI3_HOST) — it fails on this board!
 #ifdef USE_W5500
 #include <SPI.h>
-#include <Ethernet.h>
+#include <Ethernet.h>        // Arduino Ethernet library (patched: SPI.begin() removed in w5100.cpp)
 #include "EthWebServer.h"
 #include "web_adapter.h"
 #define HAS_W5500
 
-static byte eth_mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
+// EthernetClient for TCP connections over W5500
 EthernetClient eth_tcp_client;
 
-// EthernetServer subclass removed — replaced by EthWebServer (web_adapter.h)
-#endif
+// W5500 link state — checked via Ethernet.linkStatus() / hardwareStatus()
+static EthernetHardwareStatus w5500_hw_status = EthernetNoHardware;
+static EthernetLinkStatus w5500_link_status = Unknown;
+
+void onW5500Event(arduino_event_id_t event)
+{
+    // Not used with Arduino Ethernet library — it's not event-driven
+    // Link status is polled via Ethernet.linkStatus() in eth_loop()
+}
+// NOTE: #endif for USE_W5500 is at END of file — Ethernet obj must be visible
+// in all HAS_W5500 sections below
 
 // ─── ETH Event Handler (LAN8720 & IP101) ──────────────────────
 #ifdef HAS_EMAC
@@ -111,7 +126,7 @@ void eth_init()
 
     if (cfg.lan_type == 0)
     {
-        // ── W5500 via SPI — init happens in FreeRTOS task (no WDT conflict) ──
+        // ── W5500 via Arduino Ethernet library (FSPI bus, same as v2.8.0!) ──
 #ifdef HAS_W5500
         LOG_ILN("[LAN] W5500 init will start via FreeRTOS task in eth_loop()");
 #else
@@ -199,7 +214,7 @@ void eth_loop()
             if (millis() - boot_time < 3000)
                 return;
 
-            LOG_ILN("[LAN] Creating W5500 init task...");
+            LOG_ILN("[LAN] Creating W5500 Ethernet init task...");
             xTaskCreate(
                     [](void *param) {
                         // Step 1: RST pulse
@@ -218,40 +233,40 @@ void eth_loop()
                             LOG_ILN("[LAN-TASK] WARNING: RST pin not configured (-1)");
                         }
 
-                        // Step 2: SPI + init
+                        // Step 2: Initialize SPI bus with W5500 pins on FSPI
+                        // CRITICAL: SPI.end() first to release any prior init (WiFi/SD/etc may
+                        // have called SPI.begin() with different pins). Without end(), the
+                        // second begin() silently returns and leaves wrong pins configured!
+                        LOG_I("[LAN-TASK] SPI.end() — releasing any prior SPI init\n");
+                        SPI.end();
                         LOG_I("[LAN-TASK] SPI.begin(sclk=%d, miso=%d, mosi=%d, cs=%d)\n",
                               cfg.pin_eth_sclk, cfg.pin_eth_miso, cfg.pin_eth_mosi, cfg.pin_eth_cs);
                         SPI.begin(cfg.pin_eth_sclk, cfg.pin_eth_miso, cfg.pin_eth_mosi, cfg.pin_eth_cs);
+
+                        // Step 3: Set CS pin and initialize Ethernet
                         LOG_I("[LAN-TASK] Ethernet.init(cs=%d)\n", cfg.pin_eth_cs);
                         Ethernet.init(cfg.pin_eth_cs);
-                        vTaskDelay(pdMS_TO_TICKS(100));
 
-                        // Check hardware status right after init
-                        int hw = Ethernet.hardwareStatus();
-                        int lnk = Ethernet.linkStatus();
-                        LOG_I("[LAN-TASK] hwStatus=%d (%s) linkStatus=%d (%s)\n",
-                              hw, hw == EthernetW5500 ? "W5500" : hw == EthernetNoHardware ? "NO_HW" : "UNKNOWN",
-                              lnk, lnk == LinkON ? "ON" : lnk == LinkOFF ? "OFF" : "UNKNOWN");
+                        // Step 4: MAC address (use default from W5500 chip, or set custom)
+                        static byte eth_mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
 
-                        // Step 3: DHCP or Static IP (blocking call — safe in dedicated task)
-                        bool ok = false;
+                        // Step 5: Start Ethernet
                         if (cfg.lan_dhcp)
                         {
-                            LOG_ILN("[LAN-TASK] Starting DHCP (timeout 5s, resp_timeout 2s)...");
-                            int result = Ethernet.begin(eth_mac, 5000, 2000);
-                            LOG_I("[LAN-TASK] DHCP result=%d\n", result);
-                            if (result == 0)
+                            LOG_ILN("[LAN-TASK] Ethernet.begin(mac) — DHCP...");
+                            int ret = Ethernet.begin(eth_mac, 30000, 4000);
+                            LOG_I("[LAN-TASK] Ethernet.begin() = %d\n", ret);
+                            if (ret == 0)
                             {
-                                hw = Ethernet.hardwareStatus();
-                                lnk = Ethernet.linkStatus();
-                                LOG_I("[LAN-TASK] DHCP FAILED — hw=%d link=%d IP=%s\n",
-                                      hw, lnk, Ethernet.localIP().toString().c_str());
+                                LOG_ELN("[LAN-TASK] ✗ DHCP FAILED — no IP acquired");
+                                w5500_task_ok = false;
+                                w5500_task_done = true;
+                                vTaskDelete(NULL);
+                                return;
                             }
-                            else
-                            {
-                                LOG_I("[LAN-TASK] ✓ DHCP OK! IP: %s\n", Ethernet.localIP().toString().c_str());
-                                ok = true;
-                            }
+                            LOG_I("[LAN-TASK] ✓ DHCP OK! IP: %s\n", Ethernet.localIP().toString().c_str());
+                            w5500_task_ok = true;
+                            lan_connected = true;
                         }
                         else
                         {
@@ -261,25 +276,30 @@ void eth_loop()
                             mask.fromString(cfg.lan_mask);
                             dns.fromString(cfg.lan_dns);
                             Ethernet.begin(eth_mac, ip, dns, gw, mask);
-                            ok = true;
                             LOG_I("[LAN-TASK] ✓ Static IP: %s\n", Ethernet.localIP().toString().c_str());
+                            w5500_task_ok = true;
+                            lan_connected = true;
                         }
 
-                        w5500_task_ok = ok;
                         w5500_task_done = true;
-                        LOG_I("[LAN-TASK] hw=%s link=%s — task done, deleting self\n",
-                              Ethernet.hardwareStatus() == EthernetW5500 ? "W5500" : "NO_HW",
-                              Ethernet.linkStatus() == LinkON ? "ON" : "OFF");
+                        w5500_hw_status = Ethernet.hardwareStatus();
+                        w5500_link_status = Ethernet.linkStatus();
+                        LOG_I("[LAN-TASK] hw=%s link=%s IP=%s — task done\n",
+                              w5500_hw_status == EthernetW5500 ? "W5500" :
+                              w5500_hw_status == EthernetW5200 ? "W5200" :
+                              w5500_hw_status == EthernetW5100 ? "W5100" : "NO_HW",
+                              w5500_link_status == LinkON ? "ON" :
+                              w5500_link_status == LinkOFF ? "OFF" : "UNKNOWN",
+                              Ethernet.localIP().toString().c_str());
                         vTaskDelete(NULL); // self-delete
                     },
                     "w5500_init",
-                    4096, // stack size
+                    8192,
                     NULL,
-                    1, // low priority (don't starve main loop)
+                    1,
                     NULL);
             task_created = true;
         }
-        // Task is running — just return, eth_loop() will check w5500_task_done next iteration
         return;
 #endif // HAS_W5500
     }
@@ -293,38 +313,37 @@ void eth_loop()
             lan_connected = true;
         }
         lan_started = true;
-        LOG_I("[LAN] W5500 init complete: ip=%s connected=%s\n",
+        w5500_hw_status = Ethernet.hardwareStatus();
+        w5500_link_status = Ethernet.linkStatus();
+        LOG_I("[LAN] W5500 Ethernet init complete: hw=%s link=%s ip=%s connected=%s\n",
+              w5500_hw_status == EthernetW5500 ? "W5500" : "NO_HW",
+              w5500_link_status == LinkON ? "ON" : "OFF",
               Ethernet.localIP().toString().c_str(),
               lan_connected ? "true" : "false");
-
-        // SPI.begin() in the FreeRTOS task can disrupt WiFi — force reconnect
-        if (WiFi.status() != WL_CONNECTED)
-        {
-            LOG_ILN("[LAN] WiFi disrupted by SPI init — reconnecting...");
-            WiFi.reconnect();
-            wifi_reconnect_count();
-        }
 #endif
     }
 
-    // ── W5500 link monitoring + DHCP maintain ──
+    // ── W5500 link monitoring ──
     static uint32_t last_check = 0;
     if (millis() - last_check > 3000)
     {
         if (cfg.lan_type == 0 && lan_started)
         {
 #ifdef HAS_W5500
-            Ethernet.maintain(); // DHCP lease renewal
-
-            bool link = (Ethernet.linkStatus() == LinkON);
-            // Periodic debug: log link/hw status every 10s
+            w5500_link_status = Ethernet.linkStatus();
+            w5500_hw_status = Ethernet.hardwareStatus();
+            bool link = (w5500_link_status == LinkON);
+            // Periodic debug
             {
                 static uint32_t last_dbg = 0;
                 if (millis() - last_dbg > 10000)
                 {
-                    LOG_I("[LAN] monitor: hw=%d link=%s IP=%s connected=%s\n",
-                          Ethernet.hardwareStatus(),
-                          link ? "ON" : "OFF",
+                    LOG_I("[LAN] monitor: hw=%s link=%s IP=%s connected=%s\n",
+                          w5500_hw_status == EthernetW5500 ? "W5500" :
+                          w5500_hw_status == EthernetW5200 ? "W5200" :
+                          w5500_hw_status == EthernetW5100 ? "W5100" : "NO_HW",
+                          w5500_link_status == LinkON ? "ON" :
+                          w5500_link_status == LinkOFF ? "OFF" : "UNKNOWN",
                           Ethernet.localIP().toString().c_str(),
                           lan_connected ? "Y" : "N");
                     last_dbg = millis();
@@ -348,9 +367,8 @@ void eth_loop()
             {
                 static bool w5500_lost = false;
                 static uint32_t link_down_since = 0;
-                int hw = Ethernet.hardwareStatus();
 
-                if (hw != EthernetW5500)
+                if (w5500_hw_status == EthernetNoHardware)
                 {
                     // Chip not responding — schedule full reinit
                     if (!w5500_lost)
@@ -383,13 +401,30 @@ void eth_loop()
                 if (w5500_lost)
                 {
                     static uint32_t last_reinit = 0;
-                    if (millis() - last_reinit > 30000) // reinit every 30s
+                    static int reinit_count = 0;
+                    const int MAX_REINITS = 20;  // Allow many retries — hardware may recover
+                    const unsigned long REINIT_INTERVAL = 30000;  // 30s base
+                    if (reinit_count < MAX_REINITS && millis() - last_reinit > REINIT_INTERVAL)
                     {
                         last_reinit = millis();
-                        LOG_ILN("[LAN] Initiating W5500 full reinit...");
+                        reinit_count++;
+                        LOG_I("[LAN] Initiating W5500 full reinit (attempt %d/%d)...\n", reinit_count, MAX_REINITS);
                         w5500_reinit();
-                        w5500_lost = false; // allow re-detection on next failure
+                        w5500_lost = false;
                         link_down_since = 0;
+                    }
+                    else if (reinit_count >= MAX_REINITS && !w5500_reinit_giveup)
+                    {
+                        w5500_reinit_giveup = true;
+                        LOG_I("[LAN] W5500 reinit limit reached (%d). Will retry after 5 min cooldown.\n", MAX_REINITS);
+                    }
+                    else if (w5500_reinit_giveup && millis() - last_reinit > 300000)
+                    {
+                        // After 5 min cooldown, reset counters and try again
+                        w5500_reinit_giveup = false;
+                        reinit_count = 0;
+                        last_reinit = 0;
+                        LOG_I("[LAN] W5500 reinit cooldown expired — will retry.\n");
                     }
                 }
             }
@@ -399,31 +434,31 @@ void eth_loop()
         last_check = millis();
     }
 
-    // ── W5500 DHCP retry every 30s (via FreeRTOS task to avoid blocking loop) ──
+    // ── W5500 DHCP retry every 30s ──
     if (cfg.lan_type == 0 && lan_started && !lan_connected)
     {
 #ifdef HAS_W5500
         static uint32_t last_dhcp_retry = 0;
         if (millis() - last_dhcp_retry > 30000)
         {
-            if (Ethernet.linkStatus() == LinkON && Ethernet.localIP() == IPAddress(0, 0, 0, 0))
+            EthernetLinkStatus ls = Ethernet.linkStatus();
+            if (ls == LinkON && Ethernet.localIP() == IPAddress(0, 0, 0, 0))
             {
-                int hw = Ethernet.hardwareStatus();
-                int lnk = Ethernet.linkStatus();
-                LOG_I("[LAN] W5500 retrying DHCP — hw=%d link=%d IP=%s\n",
-                      hw, lnk, Ethernet.localIP().toString().c_str());
+                LOG_I("[LAN] W5500 retrying DHCP — link=ON IP=0.0.0.0\n");
                 static volatile bool retry_task_running = false;
                 if (!retry_task_running)
                 {
                     retry_task_running = true;
                     xTaskCreate(
                             [](void *param) {
-                                int result = Ethernet.begin(eth_mac, 5000, 2000);
-                                int hw2 = Ethernet.hardwareStatus();
-                                int lnk2 = Ethernet.linkStatus();
-                                LOG_I("[LAN-RETRY] DHCP result=%d hw=%d link=%d IP=%s\n",
-                                      result, hw2, lnk2, Ethernet.localIP().toString().c_str());
-                                if (result == 0)
+                                static byte eth_mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
+                                int ret = Ethernet.begin(eth_mac, 15000, 4000);
+                                LOG_I("[LAN-RETRY] DHCP result=%d hw=%s link=%s IP=%s\n",
+                                      ret,
+                                      Ethernet.hardwareStatus() == EthernetW5500 ? "W5500" : "NO_HW",
+                                      Ethernet.linkStatus() == LinkON ? "ON" : "OFF",
+                                      Ethernet.localIP().toString().c_str());
+                                if (ret == 0)
                                 {
                                     LOG_ELN("[LAN-RETRY] DHCP FAILED");
                                 }
@@ -476,29 +511,31 @@ void w5500_reinit()
                     LOG_ILN("[LAN-REINIT] RST pulse done → HIGH");
                 }
 
-                // Step 2: SPI reinit
-                LOG_ILN("[LAN-REINIT] Re-initializing SPI + W5500...");
+                // Step 2: Re-init SPI and Ethernet
+                LOG_ILN("[LAN-REINIT] Re-initializing W5500 via Arduino Ethernet lib (FSPI)...");
+                SPI.end(); // Release any prior SPI config
                 SPI.begin(cfg.pin_eth_sclk, cfg.pin_eth_miso, cfg.pin_eth_mosi, cfg.pin_eth_cs);
                 Ethernet.init(cfg.pin_eth_cs);
                 vTaskDelay(pdMS_TO_TICKS(100));
 
                 // Step 3: Check hardware
-                int hw = Ethernet.hardwareStatus();
-                if (hw != EthernetW5500)
+                EthernetHardwareStatus hw = Ethernet.hardwareStatus();
+                if (hw == EthernetNoHardware)
                 {
-                    LOG_E("[LAN-REINIT] W5500 not detected after reinit (hw=%d). Aborting.\n", hw);
+                    LOG_ELN("[LAN-REINIT] W5500 not detected after reinit. Aborting.");
                     reinit_task_running = false;
                     vTaskDelete(NULL);
                 }
-                LOG_ILN("[LAN-REINIT] W5500 hardware OK");
+                LOG_I("[LAN-REINIT] W5500 hardware OK (hw=%d)\n", hw);
 
                 // Step 4: DHCP or Static IP
+                static byte eth_mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
                 bool ok = false;
                 if (cfg.lan_dhcp)
                 {
-                    LOG_ILN("[LAN-REINIT] Starting DHCP (5s timeout)...");
-                    int result = Ethernet.begin(eth_mac, 5000, 2000);
-                    if (result == 0)
+                    LOG_ILN("[LAN-REINIT] Starting DHCP (15s timeout)...");
+                    int ret = Ethernet.begin(eth_mac, 15000, 4000);
+                    if (ret == 0)
                     {
                         LOG_ELN("[LAN-REINIT] DHCP FAILED — no IP acquired");
                     }
@@ -761,3 +798,5 @@ void eth_hard_reset_and_restart()
     // Then trigger a real hardware reset via RTC WDT
     esp_restart();
 }
+
+#endif // USE_W5500 — end of W5500 conditional block (started at top of file)

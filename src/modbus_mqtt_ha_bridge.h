@@ -64,17 +64,15 @@
 #define PIN_SD_MISO 5
 #define PIN_SD_SCLK 7
 #define PIN_SD_CS 4
-// SDIO 1-bit pin mapping (same physical slot, different signal names):
-//   SD_CLK = GPIO7 (same as SPI SCLK)
-//   SD_CMD = GPIO4 (same as SPI CS — NOT MOSI!)
-//   SD_D0  = GPIO6 (same as SPI MOSI)
-//   SD_D1  = GPIO5 (same as SPI MISO)
+// SDIO 1-bit pin mapping — Waveshare wired the slot for SPI but
+// the SD_MOSI net connects to TF1 pin 3 (CMD), and SD_MISO to TF1 pin 7 (D0).
+// In SDIO mode: TF1 CMD=GPIO6, TF1 D0=GPIO5, TF1 CLK=GPIO7
 // ESP32-S3 requires ALL 6 pins via GPIO matrix (SOC_SDMMC_USE_GPIO_MATRIX=1)
 // D2/D3 not wired to slot — use dummy available GPIOs
 #define PIN_SDIO_CLK  7
-#define PIN_SDIO_CMD  4
-#define PIN_SDIO_D0   6
-#define PIN_SDIO_D1   5
+#define PIN_SDIO_CMD  6   // TF1 pin 3 (CMD) = SD_MOSI net = GPIO6
+#define PIN_SDIO_D0   5   // TF1 pin 7 (D0)  = SD_MISO net = GPIO5
+#define PIN_SDIO_D1   17   // NOT connected to slot, use dummy GPIO
 #define PIN_SDIO_D2   18   // NOT connected to slot (available GPIO)
 #define PIN_SDIO_D3   17   // NOT connected to slot (available GPIO)
 
@@ -130,7 +128,7 @@
 #define MQTT_RECONNECT_MS 5000
 
 // ─── Firmware Version ────────────────────────────────────────
-#define FIRMWARE_VERSION "2.12.16" // Auto-extscan + auto-adopt: unknown Modbus devices → MQTT entities
+#define FIRMWARE_VERSION "2.12.19" // SD deferred init + 3V3_EN power ctrl + LAN fix
 
 // ─── TCP Modbus Bridge ─────────────────────────────────────────
 #define TCP_PORT 502
@@ -498,6 +496,12 @@ const char *di_edge_action_str(uint8_t action);
 const char *di_input_type_str(uint8_t type);
 
 // sd_handler.cpp
+#ifdef USE_SD
+extern bool sd_init_pending;
+extern char sd_last_diag[];
+bool sd_power_is_on();
+void sd_power_enable();
+void sd_power_cycle();
 bool sd_init(int8_t cs_pin);                                  // SPI only (safe)
 bool sd_init(int8_t cs_pin, const char *mode);        // "spi","sdio","auto"
 void sd_deinit();
@@ -526,6 +530,42 @@ bool sd_delete_path(const char *path);
 bool sd_append_file(const char *path, const uint8_t *data, size_t len);
 bool sd_file_exists(const char *path);
 bool sd_remove_file(const char *path);
+#else
+// SD disabled — stubs
+static constexpr bool sd_init_pending = false;
+static char sd_last_diag[1] = {0};
+inline bool sd_is_ok() { return false; }
+inline void sd_deinit() {}
+inline bool sd_begin_exclusive() { return false; }
+inline void sd_end_exclusive() {}
+inline uint64_t sd_total_kb() { return 0; }
+inline uint64_t sd_used_kb() { return 0; }
+inline bool sd_format() { return false; }
+inline bool sd_mkdir(const char*) { return false; }
+inline bool sd_delete_path(const char*) { return false; }
+inline char *sd_read_file(const char*, size_t*) { return nullptr; }
+inline char *sd_browse_dir(const char*, size_t*) { return nullptr; }
+inline bool sd_init(int8_t) { return false; }
+inline bool sd_init(int8_t, const char*) { return false; }
+inline bool sd_power_is_on() { return false; }
+inline void sd_power_enable() {}
+inline void sd_power_cycle() {}
+inline bool sd_has_pin_conflict() { return false; }
+inline bool sd_is_sdio_mode() { return false; }
+inline bool sd_is_exclusive() { return false; }
+inline String sd_gpio_diag() { return "SD disabled"; }
+inline String sd_test_init() { return "SD disabled"; }
+inline const char *sd_type_str() { return "none"; }
+inline void sd_refresh_stats() {}
+inline bool sd_save_register_list(const char*, const char*, size_t) { return false; }
+inline char *sd_read_register_list(const char*, size_t*) { return nullptr; }
+inline char *sd_list_register_files(size_t*) { return nullptr; }
+inline bool sd_delete_register_list(const char*) { return false; }
+inline bool sd_write_file(const char*, const uint8_t*, size_t) { return false; }
+inline bool sd_append_file(const char*, const uint8_t*, size_t) { return false; }
+inline bool sd_file_exists(const char*) { return false; }
+inline bool sd_remove_file(const char*) { return false; }
+#endif
 
 // led_handler.cpp
 void led_init();

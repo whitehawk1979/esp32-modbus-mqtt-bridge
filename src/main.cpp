@@ -964,15 +964,11 @@ static void do_staged_init()
             // The callback mechanism exists so external code can hook in.
         });
 #ifdef USE_SD
-        // ── SD Card init (after LAN, shares FSPI bus) ──
-        if (cfg.sd_enabled)
-        {
-            LOG_ILN("[INIT] SD card...");
-            if (sd_init(cfg.pin_sd_cs, "auto"))
-                LOG_ILN("[INIT] SD OK");
-            else
-                LOG_ELN("[INIT] SD FAILED — card present?");
-        }
+        // ── SD Card init deferred to loop() — must NOT block setup() ──
+        // W5500 init runs in FreeRTOS task from eth_loop(), which needs
+        // loop() to be running. If SD.begin() blocks here, W5500 never starts.
+        LOG_ILN("[INIT] SD init deferred (after W5500 ready)");
+        sd_init_pending = true;
 #endif
 #ifdef USE_STORAGE
         // ── LittleFS Flash Storage init ──
@@ -1100,6 +1096,22 @@ void loop()
     eth_loop();       // Check LAN link status
     wifi_maintain();  // Keep WiFi alive as fallback
     update_network(); // Auto-switch: LAN↔WiFi
+
+    // ── Deferred SD init: after W5500 task completes ──
+#ifdef USE_SD
+    if (sd_init_pending && cfg.sd_enabled && (eth_is_started() || millis() > 15000))
+    {
+        sd_init_pending = false;
+        LOG_ILN("[LOOP] Deferred SD init starting...");
+        if (sd_init(cfg.pin_sd_cs, "spi"))
+            LOG_ILN("[LOOP] SD OK");
+        else
+        {
+            LOG_ELN("[LOOP] SD FAILED — disabling");
+            cfg.sd_enabled = false;
+        }
+    }
+#endif
 
     // ── MQTT & TCP (only when connected) ────────────────────
     mqtt_loop();

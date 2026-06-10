@@ -62,6 +62,8 @@ static void cfg_defaults()
     cfg.pin_rs485_de = 42;
     cfg.pin_status_led = 2;
     cfg.pin_config_btn = 0;
+    // W5500 Ethernet — Waveshare ESP32-S3-ETH V1.0
+    // Test: revert to v2.9.0 pins (last known working LAN config 2026.05.27)
     cfg.pin_eth_mosi = 11;
     cfg.pin_eth_miso = 12;
     cfg.pin_eth_sclk = 13;
@@ -400,6 +402,29 @@ void config_load()
 
     // Auto-provision factory defaults if NVRAM empty (e.g. after erase_flash)
     factory_provision(nv);
+
+    // ── W5500 pin migration: schematic-verified pin mapping ──
+    // Force-correct W5500 pins if NVS has old wrong values from pre-schematic era
+    // Old (wrong): CS=14, MOSI=11, SCLK=13, INT=10, RST=9
+    // New (schematic): CS=10, MOSI=13, SCLK=11, INT=15, RST=14
+    {
+        // NV_KEY consts are const char* — use struct array
+        struct PinMigrate { const char* key; int val; };
+        PinMigrate old_pins[] = {
+            {NV_KEY_PIN_ETH_MOSI, 11},  // was 13
+            {NV_KEY_PIN_ETH_SCLK, 13},  // was 11
+            {NV_KEY_PIN_ETH_CS,   14},  // was 10
+            {NV_KEY_PIN_ETH_INT,  10},  // was 15
+            {NV_KEY_PIN_ETH_RST,   9},  // was 14
+        };
+        // Check if NVS has the schematic-vision values — force revert to v2.9.0
+        if (nv.getInt(NV_KEY_PIN_ETH_CS, -1) == 10 || nv.getInt(NV_KEY_PIN_ETH_RST, -1) == 14 ||
+            nv.getInt(NV_KEY_PIN_ETH_INT, -1) == 15 || nv.getInt(NV_KEY_PIN_ETH_MOSI, -1) == 13 ||
+            nv.getInt(NV_KEY_PIN_ETH_SCLK, -1) == 11) {
+            Serial.println("[CONFIG] W5500 pins migration: old values detected, updating to schematic-verified pins");
+            for (auto &p : old_pins) nv.putInt(p.key, p.val);
+        }
+    }
 
     // ── Read all values from NVRAM ──
     nv.getString(NV_KEY_WIFI_SSID, cfg.wifi_ssid, sizeof(cfg.wifi_ssid));

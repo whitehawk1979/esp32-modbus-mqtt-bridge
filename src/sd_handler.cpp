@@ -15,9 +15,9 @@
 // Compile with -DUSE_SD to include SD card support.
 
 #include "modbus_mqtt_ha_bridge.h"
+#include "BitBangSD.h"
 
 #ifdef USE_SD
-
 #include <SD_MMC.h>
 #include <SD.h>
 #include <SPI.h>
@@ -26,10 +26,45 @@
 // ─── State ────────────────────────────────────────────────────
 static bool sd_initialized = false;
 static bool sd_pin_conflict = false;
+static BitBangSD bbsd;  // Bit-bang SD driver (fallback when HW SPI fails)
 static bool sd_using_sdio = false;   // true = SDIO 1-bit, false = SPI
 static uint64_t sd_total_bytes = 0;
 static uint64_t sd_used_bytes = 0;
 static char sd_card_type[16] = "NONE";
+char sd_last_diag[128] = "";  // Last SD init diagnostic result
+
+bool sd_init_pending = false;  // deferred SD init flag
+
+// ── VCC3.3_A power control via GPIO15 (3V3_EN) ──
+// Waveshare ESP32-S3-ETH V1.0: Q3 (APM2307 P-MOSFET) switches VCC3.3_A
+// GPIO15 = 3V3_EN: LOW = VCC3.3A ON (SD powered), HIGH = OFF (SD dead!)
+// Must be driven LOW before SD card access
+void sd_power_enable()
+{
+    const int PIN_3V3_EN = 15;
+    pinMode(PIN_3V3_EN, OUTPUT);
+    digitalWrite(PIN_3V3_EN, LOW);   // LOW = Q3 open = VCC3.3A ON
+    delay(200);  // let power rail stabilize
+    LOG_I("[SD] 3V3_EN (GPIO15) → LOW = VCC3.3A ON\n");
+}
+
+bool sd_power_is_on()
+{
+    const int PIN_3V3_EN = 15;
+    pinMode(PIN_3V3_EN, INPUT);
+    return digitalRead(PIN_3V3_EN) == 0;  // LOW = power ON
+}
+
+void sd_power_cycle()
+{
+    const int PIN_3V3_EN = 15;
+    pinMode(PIN_3V3_EN, OUTPUT);
+    digitalWrite(PIN_3V3_EN, HIGH);  // VCC3.3A OFF
+    delay(500);
+    digitalWrite(PIN_3V3_EN, LOW);   // VCC3.3A ON
+    delay(500);
+    LOG_I("[SD] Power cycle: GPIO15 HIGH(500ms) → LOW(500ms)\n");
+}
 
 // SPI bus (fallback)
 static SPIClass *sd_spi = nullptr;
@@ -60,6 +95,13 @@ static void w5500_cs_high()
 // ESP32-S3 supports GPIO matrix remap → any GPIO for SDMMC.
 static bool sd_init_sdio()
 {
+    // Power-cycle SD card before SDIO init
+    if (!sd_power_is_on() || true)  // Always power cycle
+    {
+        LOG_I("[SD] Power-cycling SD card for SDIO init...\n");
+        sd_power_cycle();
+    }
+
     LOG_I("[SD] Trying SDIO 1-bit mode (CLK=%d, CMD=%d, D0=%d, D1=%d, D2=%d, D3=%d)...\n",
           PIN_SDIO_CLK, PIN_SDIO_CMD, PIN_SDIO_D0, PIN_SDIO_D1, PIN_SDIO_D2, PIN_SDIO_D3);
 
@@ -125,7 +167,7 @@ static bool sd_init_sdio()
 // W5500 CS = GPIO14 (keep HIGH during SD transactions)
 static bool sd_init_spi(int8_t cs_pin)
 {
-    LOG_I("[SD] Waveshare SPI mode: SCLK=%d MISO=%d MOSI=%d CS=%d\n",
+    LOG_I("[SD] SPI mode: SCLK=%d MISO=%d MOSI=%d CS=%d\n",
           PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, cs_pin);
 
     if (cs_pin < 0)
@@ -155,7 +197,7 @@ static bool sd_init_spi(int8_t cs_pin)
     {
         if (sd_using_sdio)
             SD_MMC.end();
-        else
+        else if (sd_card_type[0] != 'B')  // Don't end Arduino SD if using BitBang
             SD.end();
         sd_initialized = false;
     }
@@ -165,55 +207,46 @@ static bool sd_init_spi(int8_t cs_pin)
         sd_spi = nullptr;
     }
 
-    // W5500 CS HIGH — prevent bus conflict during SD init
-    w5500_cs_high();
+    // ── STRATEGY 1: BitBangSD (primary for Waveshare ESP32-S3-ETH) ──
+    // HW SPI fails on this board because GPIO4/5/6/7 are not native SPI pins
+    // and the ESP-IDF sdspi driver re-initializes the GPIO matrix.
+    // BitBangSD uses direct digitalWrite/digitalRead — no SPI bus conflict with W5500.
 
-    // ── Waveshare official method ──
-    // 1) SPI.begin(SCLK, MISO, MOSI, CS) — initialise the SPI bus
-    // 2) SD.begin(CS) — mount the card (Arduino SD library manages SPIClass internally)
-    LOG_I("[SD] SPI.begin(%d,%d,%d,%d)...\n", PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, cs_pin);
-    SPI.begin(PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, cs_pin);
-
-    // Small delay for bus stabilisation after SPI.begin
-    delay(50);
-    w5500_cs_high();
-
-    // Try SD.begin once — 3-retry wastes boot time when no card is present
-    // (R7/R19 not fitted on V1.0 boards, SD will always fail)
-    LOG_I("[SD] SD.begin(CS=%d, SPI 4MHz)...\n", cs_pin);
-    if (!SD.begin(cs_pin))
+    // W5500 CS HIGH — prevent bus conflict
+    if (cfg.pin_eth_cs >= 0)
     {
-        LOG_E("[SD] SD.begin() failed — no card or hardware issue\n");
-        SPI.end();
-        return false;
+        pinMode(cfg.pin_eth_cs, OUTPUT);
+        digitalWrite(cfg.pin_eth_cs, HIGH);
     }
-
-    sd_using_sdio = false;
-    sd_initialized = true;
-
-    uint8_t type = SD.cardType();
-    if (type == CARD_MMC)
-        strlcpy(sd_card_type, "MMC", sizeof(sd_card_type));
-    else if (type == CARD_SD)
-        strlcpy(sd_card_type, "SDSC", sizeof(sd_card_type));
-    else if (type == CARD_SDHC)
-        strlcpy(sd_card_type, "SDHC", sizeof(sd_card_type));
-    else
-        strlcpy(sd_card_type, "UNKNOWN", sizeof(sd_card_type));
-
-    sd_total_bytes = SD.totalBytes();
-    sd_used_bytes = SD.usedBytes();
-
-    LOG_I("[SD] SPI OK — Type: %s, Total: %llu KB, Used: %llu KB\n",
-          sd_card_type, sd_total_bytes / 1024, sd_used_bytes / 1024);
-
-    if (!SD.exists("/registers"))
+    
+    LOG_I("[SD] Trying BitBangSD (CS=%d, MISO=%d, MOSI=%d, SCLK=%d, power_cycle=YES)...\n",
+           cs_pin, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_SCLK);
+    
+    if (bbsd.init(cs_pin, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_SCLK, 15, true))  // WITH power cycle
     {
-        SD.mkdir("/registers");
-        LOG_I("[SD] Created /registers directory\n");
-    }
+        LOG_I("[SD] BitBangSD init SUCCESS! Card: %s\n", bbsd.getCardInfo().c_str());
+        sd_using_sdio = false;
+        sd_initialized = true;
+        strlcpy(sd_card_type, "BitBang", sizeof(sd_card_type));
+        sd_total_bytes = 0;
+        sd_used_bytes = 0;
+        snprintf(sd_last_diag, sizeof(sd_last_diag), "BBSB OK: %s", bbsd.getCardInfo().c_str());
 
-    return true;
+        // Try to list root directory
+        uint8_t workBuf[512];
+        String listing = bbsd.listRootDir(workBuf);
+        LOG_I("[SD] Root dir listing:\n%s\n", listing.c_str());
+        return true;
+    }
+    
+    LOG_I("[SD] BitBangSD failed (CMD0 R1=0x%02x). No fallback — HW SPI would break W5500 FSPI bus.\n", bbsd.getLastR1());
+    snprintf(sd_last_diag + strlen(sd_last_diag),
+             sizeof(sd_last_diag) - strlen(sd_last_diag),
+             " BBSB FAIL=0x%02x", bbsd.getLastR1());
+    return false;
+    // NOTE: BitBangSD is the only SD driver on Waveshare ESP32-S3-ETH.
+    // Arduino SD.begin() via HW SPI would break W5500 FSPI bus — do not use.
+    return false;  // unreachable — satisfies compiler
 }
 
 // ─── Unified SD Init ──────────────────────────────────────────

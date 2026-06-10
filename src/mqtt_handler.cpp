@@ -17,7 +17,7 @@
 
 #ifdef USE_W5500
 #include <Ethernet.h>
-extern EthernetClient eth_tcp_client; // defined in eth_handler.cpp
+extern EthernetClient eth_tcp_client; // defined in eth_handler.cpp (Arduino Ethernet lib)
 #endif
 
 // Client instances for different transport options
