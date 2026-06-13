@@ -483,6 +483,12 @@ void config_load()
     cfg.pin_rs485_rx = (int8_t)nv.getInt(NV_KEY_PIN_RS485_RX, 44);
     cfg.pin_rs485_tx = (int8_t)nv.getInt(NV_KEY_PIN_RS485_TX, 43);
     cfg.pin_rs485_de = (int8_t)nv.getInt(NV_KEY_PIN_RS485_DE, 42);
+    // Force-fix: GPIO4 is SD CS, not RS485 DE — always override if stale value persists
+    if (cfg.pin_rs485_de == 4) {
+        cfg.pin_rs485_de = 42;
+        nv.putInt(NV_KEY_PIN_RS485_DE, 42);
+        Serial.println("[CONFIG] RS485 DE forced GPIO4→GPIO42 at load time");
+    }
     cfg.pin_status_led = (int8_t)nv.getInt(NV_KEY_PIN_LED, 2);
     cfg.pin_config_btn = (int8_t)nv.getInt(NV_KEY_PIN_BTN, 0);
     cfg.pin_eth_mosi = (int8_t)nv.getInt(NV_KEY_PIN_ETH_MOSI, 11);
