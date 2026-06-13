@@ -426,6 +426,16 @@ void config_load()
         }
     }
 
+    // ── RS485 DE pin migration: GPIO4 → GPIO42 ──
+    // GPIO4 is the SD card CS pin on Waveshare ESP32-S3-ETH V1.0;
+    // old factory_provision() wrote GPIO4 by mistake.
+    {
+        if (nv.getInt(NV_KEY_PIN_RS485_DE, 42) == 4) {
+            Serial.println("[CONFIG] RS485 DE pin migration: GPIO4 → GPIO42 (was SD CS conflict)");
+            nv.putInt(NV_KEY_PIN_RS485_DE, 42);
+        }
+    }
+
     // ── Read all values from NVRAM ──
     nv.getString(NV_KEY_WIFI_SSID, cfg.wifi_ssid, sizeof(cfg.wifi_ssid));
     nv.getString(NV_KEY_WIFI_PASS, cfg.wifi_pass, sizeof(cfg.wifi_pass));
