@@ -23,8 +23,9 @@
 #ifdef USE_W5500
 #include <SPI.h>
 #include <Ethernet.h>        // Arduino Ethernet library (patched: SPI.begin() removed in w5100.cpp)
+#include <driver/spi_master.h>
+#include <driver/gpio.h>
 // Ethernet object is global from the library — no extern needed
-// eth_mac is defined static in eth_handler.cpp — use same MAC here
 static byte lan_mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
 #endif
 #include <Preferences.h>
@@ -2881,7 +2882,7 @@ static void handleApiSdMkdir()
 // ─── W5500 Direct SPI Diagnostic ──────────────────────────────
 // GET /api/w5500/diag — bit-bang SPI read of W5500 version register
 // Bypasses Arduino SPI library to test raw hardware connectivity
-// W5500 VersionR (0x0039) should return 0x51
+// W5500 VersionR (0x0039) should return 0x04 per datasheet v1.1.0
 static void handleApiW5500Diag()
 {
     if (!web_auth_ok())
@@ -2950,10 +2951,10 @@ static void handleApiW5500Diag()
 
     delay(10);
 
-    // ── Step 3: Bit-bang SPI read W5500 VersionR (0x0039) ──
+    // ── Bit-bang SPI transfer function ──
     // W5500 SPI Mode 0 (CPOL=0, CPHA=0):
-    //   - Data is shifted OUT on rising edge
-    //   - Master must sample MISO on/after FALLING edge (before next rising)
+    //   - Data is shifted OUT on rising edge of SCLK
+    //   - Master must sample MISO on/after falling edge (before next rising)
     auto bitBangTransfer = [&](uint8_t tx_byte) -> uint8_t {
         uint8_t rx = 0;
         for (int i = 7; i >= 0; i--) {
@@ -2972,58 +2973,261 @@ static void handleApiW5500Diag()
         return rx;
     };
 
+    // ── Step 3: Bit-bang SPI read W5500 VersionR (0x0039) ──
+    // W5500 VDM SPI frame: [Addr_H][Addr_L][Ctrl][Data...]
+    // Read VERSIONR: Addr=0x0039, Ctrl=BSB0|RWB0|OM00=0x00, then read 1 byte
+    // W5500 VERSIONR always returns 0x04 per datasheet v1.1.0
     // CS LOW
     digitalWrite(CS, LOW);
     delayMicroseconds(10);
 
-    // Phase 1: BSB[4:0]=0, M=0(read), A[15:8]=0x00 → 0x00
-    uint8_t phase1 = bitBangTransfer(0x00);
-    // Phase 2: A[7:0]=0x39 (VersionR register address)
-    uint8_t phase2 = bitBangTransfer(0x39);
-    // Phase 3: Read data (MOSI=0, clock MISO)
-    uint8_t version = bitBangTransfer(0x00);
+    uint8_t p1_rx = bitBangTransfer(0x00);   // Address Phase: Addr[15:8] = 0x00
+    uint8_t p2_rx = bitBangTransfer(0x39);   // Address Phase: Addr[7:0]  = 0x39 (VERSIONR)
+    uint8_t ctrl_rx = bitBangTransfer(0x00);  // Control Phase: BSB=00000, R=0, OM=00 (VDM read)
+    uint8_t version = bitBangTransfer(0x00);  // Data Phase: read 1 byte
 
     // CS HIGH
     digitalWrite(CS, HIGH);
 
     // ── Step 4: Try W5500 soft reset via bit-bang ──
     // Write MR register (0x0000) value 0x80 (reset)
+    // W5500 VDM write: [Addr_H][Addr_L][Ctrl][Data]
+    // Ctrl = BSB=00000, W=1, OM=00 = 0x04
     delay(10);
     digitalWrite(CS, LOW);
     delayMicroseconds(10);
-    // Phase 1: BSB=0, M=1(write), A[15:8]=0x00 → 0x04
-    bitBangTransfer(0x04);
-    // Phase 2: A[7:0]=0x00
-    bitBangTransfer(0x00);
-    // Phase 3: Data = 0x80 (reset)
-    bitBangTransfer(0x80);
+    bitBangTransfer(0x00);   // Address high: 0x00
+    bitBangTransfer(0x00);   // Address low:  0x00 (MR register)
+    bitBangTransfer(0x04);   // Control: BSB=0, Write, VDM
+    bitBangTransfer(0x80);   // Data: 0x80 = Reset
     digitalWrite(CS, HIGH);
     delay(100);  // Wait for W5500 reset to complete
 
     // ── Step 5: Re-read version after soft reset ──
     digitalWrite(CS, LOW);
     delayMicroseconds(10);
-    bitBangTransfer(0x00);   // Phase 1
-    bitBangTransfer(0x39);   // Phase 2
-    uint8_t version2 = bitBangTransfer(0x00);  // Phase 3
+    bitBangTransfer(0x00);   // Addr high
+    bitBangTransfer(0x39);   // Addr low (VERSIONR)
+    bitBangTransfer(0x00);   // Control: Read, VDM
+    uint8_t version2 = bitBangTransfer(0x00);  // Data
     digitalWrite(CS, HIGH);
 
-    doc["phase1_rx"] = phase1;
-    doc["phase2_rx"] = phase2;
+    doc["phase1_rx"] = p1_rx;
+    doc["phase2_rx"] = p2_rx;
+    doc["ctrl_rx"] = ctrl_rx;
     doc["version_rx"] = version;
     doc["version_after_softreset"] = version2;
-    doc["version_expected"] = 0x51;
-    doc["version_match"] = (version == 0x51) || (version2 == 0x51);
+    doc["version_expected"] = 0x04;  // W5500 VERSIONR per datasheet v1.1.0
+    doc["version_match"] = (version == 0x04) || (version2 == 0x04);
     doc["miso_idle"] = digitalRead(MISO);
-    doc["diag"] = (version == 0x51 || version2 == 0x51) ? "W5500_ALIVE" :
+    doc["diag"] = (version == 0x04 || version2 == 0x04) ? "W5500_ALIVE" :
                  (miso_idle_raw == 0 && miso_idle_pullup == 1) ? "MISO_FLOATING_W5500_SILENT" :
-                 (phase1 == 0x00 && phase2 == 0x00) ? "MISO_STUCK_LOW" :
-                 (phase1 == 0xFF && phase2 == 0xFF) ? "MISO_FLOATING_NO_PULLDOWN" :
+                 (p1_rx == 0x00 && p2_rx == 0x00 && ctrl_rx == 0x00) ? "MISO_STUCK_LOW" :
+                 (p1_rx == 0xFF && p2_rx == 0xFF && ctrl_rx == 0xFF) ? "MISO_FLOATING_NO_PULLDOWN" :
                  "W5500_NO_RESPONSE";
+
+    // ── Step 6: ESP-IDF SPI Master test ──
+    bool esp_idf_ok = false;
+    {
+        // Free Arduino SPI first
+        SPI.end();
+        delay(100);
+
+        spi_device_handle_t dev = NULL;
+        spi_bus_config_t bus_cfg = {};
+        bus_cfg.sclk_io_num = SCLK;
+        bus_cfg.mosi_io_num = MOSI;
+        bus_cfg.miso_io_num = MISO;
+        bus_cfg.quadwp_io_num = -1;
+        bus_cfg.quadhd_io_num = -1;
+        bus_cfg.max_transfer_sz = 16;
+        bus_cfg.flags = SPICOMMON_BUSFLAG_MASTER;
+
+        esp_err_t ret = spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
+        doc["idf_spi_bus_init"] = esp_err_to_name(ret);
+
+        if (ret == ESP_OK) {
+            spi_device_interface_config_t dev_cfg = {};
+            dev_cfg.mode = 0;
+            dev_cfg.clock_speed_hz = 1000000;
+            dev_cfg.spics_io_num = -1; // manual CS
+            dev_cfg.queue_size = 1;
+            dev_cfg.flags = SPI_DEVICE_HALFDUPLEX;
+
+            ret = spi_bus_add_device(SPI2_HOST, &dev_cfg, &dev);
+            doc["idf_spi_dev_add"] = esp_err_to_name(ret);
+
+            if (ret == ESP_OK) {
+                // Manual CS control
+                pinMode(CS, OUTPUT);
+                digitalWrite(CS, HIGH);
+
+                for (int i = 0; i < 3; i++) {
+                    uint8_t tx[4] = {0x00, 0x39, 0x04, 0x00};
+                    uint8_t rx[4] = {0};
+                    digitalWrite(CS, LOW);
+                    spi_transaction_t t = {};
+                    t.length = 32;
+                    t.tx_buffer = tx;
+                    t.rx_buffer = rx;
+                    spi_device_polling_transmit(dev, &t);
+                    digitalWrite(CS, HIGH);
+                    char key[32];
+                    snprintf(key, sizeof(key), "idf_spi_%d", i);
+                    doc[key] = rx[3];
+                    if (rx[3] == 0x04) esp_idf_ok = true;  // W5500 VERSIONR = 0x04
+                    delay(50);
+                }
+            }
+        }
+
+        if (dev) spi_bus_remove_device(dev);
+        spi_bus_free(SPI2_HOST);
+        doc["idf_spi_alive"] = esp_idf_ok;
+    }
+
+    // ── Step 7: Swapped pins test (SCLK↔MISO) ──
+    // Waveshare schematic may be wrong — ESP32-S3 native FSPI has MISO=13, SCLK=12
+    bool swapped_ok = false;
+    {
+        pinMode(RST, OUTPUT);
+        digitalWrite(RST, HIGH);
+        delay(100);
+
+        // Use swapped: SCLK=12 (was MISO), MISO=13 (was SCLK)
+        const int SW_SCLK = 12; // original MISO pin → now SCLK
+        const int SW_MISO = 13; // original SCLK pin → now MISO
+        const int SW_MOSI = 11;
+        const int SW_CS = 14;
+
+        pinMode(SW_SCLK, OUTPUT);
+        pinMode(SW_MOSI, OUTPUT);
+        pinMode(SW_MISO, INPUT_PULLUP);
+        pinMode(SW_CS, OUTPUT);
+        digitalWrite(SW_CS, HIGH);
+        digitalWrite(SW_SCLK, LOW);
+
+        auto bb_swap = [&](uint8_t tx) -> uint8_t {
+            uint8_t rx = 0;
+            for (int i = 7; i >= 0; i--) {
+                digitalWrite(SW_MOSI, (tx >> i) & 1);
+                delayMicroseconds(5);
+                digitalWrite(SW_SCLK, HIGH);
+                delayMicroseconds(5);
+                digitalWrite(SW_SCLK, LOW);
+                delayMicroseconds(2);
+                rx = (rx << 1) | digitalRead(SW_MISO);
+                delayMicroseconds(2);
+            }
+            return rx;
+        };
+
+        for (int i = 0; i < 3; i++) {
+            digitalWrite(SW_CS, LOW);
+            delayMicroseconds(10);
+            uint8_t p1 = bb_swap(0x00);
+            uint8_t p2 = bb_swap(0x39);
+            uint8_t p3 = bb_swap(0x04);
+            uint8_t ver = bb_swap(0x00);
+            digitalWrite(SW_CS, HIGH);
+            char key[32];
+            snprintf(key, sizeof(key), "swapped_%d", i);
+            doc[key] = ver;
+            if (ver == 0x04) swapped_ok = true;  // W5500 VERSIONR = 0x04
+            delay(100);
+        }
+        doc["swapped_pins_alive"] = swapped_ok;
+        doc["swapped_diag"] = swapped_ok ? "W5500_ALIVE_SWAPPED" : "SWAPPED_ALSO_FAIL";
+    }
+
+    // ── Step 8: GPIO drive test (check if ESP can toggle MISO) ──
+    {
+        pinMode(MISO, OUTPUT);
+        digitalWrite(MISO, LOW); delayMicroseconds(100);
+        int miso_lo = digitalRead(MISO);
+        digitalWrite(MISO, HIGH); delayMicroseconds(100);
+        int miso_hi = digitalRead(MISO);
+        doc["miso_drive_low"] = miso_lo;
+        doc["miso_drive_high"] = miso_hi;
+    }
 
     // Restore pins to proper SPI mode
     SPI.end();
     SPI.begin(SCLK, MISO, MOSI, CS);
+
+    String payload;
+    serializeJson(doc, payload);
+    WS->send(200, "application/json", payload);
+}
+
+// ─── W5500 GPIO Pin Scan ─────────────────────────────────────
+// Tries every GPIO as MISO with known CS/SCLK/MOSI to find W5500
+// GET /api/w5500/gpioprobe
+static void handleApiW5500PinScan()
+{
+    if (!web_auth_ok())
+        return;
+    JsonDocument doc(PsramAllocator::instance());
+
+    const int SCLK_PIN = 13;
+    const int MOSI_PIN = 11;
+    const int RST_PIN = 9;
+    const int CS_PIN = 14;
+    const int MISO_PIN = 12; // expected
+
+    // Pins to scan as alternative MISO (reduced set for speed)
+    int miso_candidates[] = {5, 6, 7, 10, 13, 15, 35, 36, 37, 38};
+    int miso_count = sizeof(miso_candidates) / sizeof(miso_candidates[0]);
+
+    // Pins to scan as alternative CS (reduced set)
+    int cs_candidates[] = {4, 5, 6, 7, 10, 15, 35, 36, 37, 38};
+    int cs_count = sizeof(cs_candidates) / sizeof(cs_candidates[0]);
+
+    // RST HIGH first
+    pinMode(RST_PIN, OUTPUT);
+    digitalWrite(RST_PIN, HIGH);
+    delay(200);
+
+    doc["note"] = "Pin scan disabled — use /api/w5500/gpioprobe for GPIO connectivity and /api/w5500/diag for SPI test";
+
+    // Phase 5: Check GPIO connectivity — are MISO/SCLK/CS connected to W5500?
+    // Toggle each pin and check if others change (crosstalk = connection)
+    JsonArray gpioProbe = doc.createNestedArray("gpio_probe");
+    int w5500_pins[] = {9, 10, 11, 12, 13, 14}; // RST, INT, MOSI, MISO, SCLK, CS
+    for (int p = 0; p < 6; p++) {
+        pinMode(w5500_pins[p], OUTPUT);
+        digitalWrite(w5500_pins[p], LOW);
+        delay(1);
+        JsonObject entry = gpioProbe.createNestedObject();
+        entry["pin"] = w5500_pins[p];
+        entry["driven"] = "LOW";
+
+        // Read all other pins
+        for (int q = 0; q < 6; q++) {
+            if (q == p) continue;
+            pinMode(w5500_pins[q], INPUT_PULLUP);
+            char key[16];
+            snprintf(key, sizeof(key), "g%d", w5500_pins[q]);
+            entry[key] = digitalRead(w5500_pins[q]);
+        }
+
+        digitalWrite(w5500_pins[p], HIGH);
+        delay(1);
+
+        // Read all other pins again
+        for (int q = 0; q < 6; q++) {
+            if (q == p) continue;
+            char key[16];
+            snprintf(key, sizeof(key), "g%d_h", w5500_pins[q]);
+            entry[key] = digitalRead(w5500_pins[q]);
+        }
+    }
+
+    // Restore SPI
+    SPI.end();
+    SPI.begin(SCLK_PIN, MISO_PIN, MOSI_PIN, CS_PIN);
+
+    doc["scan_complete"] = true;
 
     String payload;
     serializeJson(doc, payload);
@@ -3757,41 +3961,44 @@ static void handleApiLan()
         doc["cs_idle"] = digitalRead(cfg.pin_eth_cs);
         
         // ── Bit-bang SPI: read VERSIONR (0x0039) from W5500 ──
-        // W5500 SPI frame: 3 bytes address phase + 1 byte data phase
-        // Read frame: [BSB=0x04][ADDR_H=0x00][ADDR_L=0x39][OPM=0x00][DATA_OUT]
+        // W5500 VDM SPI frame: [Addr_H][Addr_L][Ctrl_B][Data]
+        // Read: Ctrl_B = BSB[4:0]=00000, RWB=0(Read), OM[1:0]=00(VDM) = 0x00
+        // VERSIONR always returns 0x04 per datasheet v1.1.0
         digitalWrite(cfg.pin_eth_cs, LOW);  // select W5500
         delayMicroseconds(5);
         
-        // Send address phase: BSB=0x04, ADDR_H=0x00, ADDR_L=0x39, OPM=0x00
-        uint8_t tx_bytes[] = {0x04, 0x00, 0x39, 0x00};
-        for (int i = 0; i < 4; i++) {
-            uint8_t b = tx_bytes[i];
+        // VDM Read frame: Address(2 bytes) + Control(1 byte) + Data phase
+        uint8_t tx_bytes[] = {0x00, 0x39, 0x00};  // Addr=0x0039, Ctrl=Read/VDM
+        for (int i = 0; i < 3; i++) {
             for (int bit = 7; bit >= 0; bit--) {
                 digitalWrite(cfg.pin_eth_sclk, LOW);
                 delayMicroseconds(2);
-                digitalWrite(cfg.pin_eth_mosi, (b & (1 << bit)) ? HIGH : LOW);
-                delayMicroseconds(2);
-                digitalWrite(cfg.pin_eth_sclk, HIGH);
+                digitalWrite(cfg.pin_eth_mosi, (tx_bytes[i] & (1 << bit)) ? HIGH : LOW);
+                delayMicroseconds(5);  // MOSI setup time before rising edge
+                digitalWrite(cfg.pin_eth_sclk, HIGH);  // Rising edge: W5500 shifts data
+                delayMicroseconds(5);  // Let MISO settle
+                digitalWrite(cfg.pin_eth_sclk, LOW);   // Falling edge
                 delayMicroseconds(2);
             }
         }
         
-        // Read data phase: 1 byte (VERSIONR should be 0x51)
+        // Read data phase: 1 byte (VERSIONR should be 0x04)
         uint8_t ver = 0;
         for (int bit = 7; bit >= 0; bit--) {
+            digitalWrite(cfg.pin_eth_sclk, HIGH);
+            delayMicroseconds(5);  // W5500 shifts out on rising edge
             digitalWrite(cfg.pin_eth_sclk, LOW);
             delayMicroseconds(2);
-            digitalWrite(cfg.pin_eth_sclk, HIGH);
-            delayMicroseconds(2);
             ver |= (digitalRead(cfg.pin_eth_miso) ? 1 : 0) << bit;
+            delayMicroseconds(2);
         }
         
         digitalWrite(cfg.pin_eth_cs, HIGH);  // deselect W5500
         delayMicroseconds(10);
         
         doc["bb_version"] = ver;
-        doc["bb_expected"] = 0x51;
-        doc["bb_match"] = (ver == 0x51);
+        doc["bb_expected"] = 0x04;  // W5500 VERSIONR per datasheet v1.1.0
+        doc["bb_match"] = (ver == 0x04);
         doc["miso_after_read"] = digitalRead(cfg.pin_eth_miso);
         
         // ── Phase B: HW SPI test — Arduino Ethernet lib already uses FSPI via SPI.begin(pins) ──
@@ -5702,6 +5909,7 @@ void web_server_init()
     web.on("/api/lan", HTTP_GET, handleApiLan);
     web.on("/api/diag", HTTP_GET, handleApiDiag);
     web.on("/api/w5500/diag", HTTP_GET, handleApiW5500Diag);
+    web.on("/api/w5500/gpioprobe", HTTP_GET, handleApiW5500PinScan);
 #ifdef USE_WS2812
     web.on("/api/led", HTTP_GET, handleApiLed);
     web.on("/api/led/set", HTTP_POST, handleApiLedSet);
@@ -5799,6 +6007,7 @@ void web_server_init()
     ethWeb.on("/api/lan", ETH_HTTP_GET, handleApiLan);
     ethWeb.on("/api/diag", ETH_HTTP_GET, handleApiDiag);
     ethWeb.on("/api/w5500/diag", ETH_HTTP_GET, handleApiW5500Diag);
+    ethWeb.on("/api/w5500/gpioprobe", ETH_HTTP_GET, handleApiW5500PinScan);
 #ifdef USE_WS2812
     ethWeb.on("/api/led", ETH_HTTP_GET, handleApiLed);
     ethWeb.on("/api/led/set", ETH_HTTP_POST, handleApiLedSet);
