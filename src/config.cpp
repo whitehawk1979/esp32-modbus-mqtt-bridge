@@ -336,7 +336,7 @@ static void factory_provision(Preferences &nv)
     }
     if (!nv.isKey(NV_KEY_PIN_RS485_DE))
     {
-        nv.putInt(NV_KEY_PIN_RS485_DE, 4);
+        nv.putInt(NV_KEY_PIN_RS485_DE, 42);
         dirty = true;
     }
     if (!nv.isKey(NV_KEY_PIN_LED))
